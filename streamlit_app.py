@@ -411,8 +411,7 @@ combined_chart = (
         growth_line,
     )
     .resolve_scale(y="independent")
-    .properties(height=475)
-    .interactive()
+    .properties(height=425)
 )
 
 st.altair_chart(

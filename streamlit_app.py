@@ -353,6 +353,37 @@ chart_df = daily_sales_df.merge(
     how="left",
 )
 
+selected_period_average = daily_sales_df["net_sales"].mean()
+
+# Give each reference line the same scale as its related series.
+sales_axis_max = max(
+    float(chart_df["net_sales"].max()),
+    float(selected_period_average),
+) * 1.05
+
+visible_growth_values = chart_df[
+    "rolling_30_day_growth"
+].dropna()
+
+if visible_growth_values.empty:
+    growth_axis_min = -1.0
+    growth_axis_max = 1.0
+else:
+    raw_growth_min = min(
+        0.0,
+        float(visible_growth_values.min()),
+    )
+    raw_growth_max = max(
+        0.0,
+        float(visible_growth_values.max()),
+    )
+    growth_padding = max(
+        (raw_growth_max - raw_growth_min) * 0.10,
+        1.0,
+    )
+    growth_axis_min = raw_growth_min - growth_padding
+    growth_axis_max = raw_growth_max + growth_padding
+
 # Daily net sales use bars and the left dollar axis.
 sales_bars = (
     alt.Chart(chart_df)
@@ -373,6 +404,9 @@ sales_bars = (
                 format="$,.0f",
                 titleColor="#1f77b4",
             ),
+            scale=alt.Scale(
+                domain=[0, sales_axis_max],
+            ),
         ),
         tooltip=[
             alt.Tooltip(
@@ -383,6 +417,36 @@ sales_bars = (
             alt.Tooltip(
                 "net_sales:Q",
                 title="Daily Net Sales",
+                format="$,.2f",
+            ),
+        ],
+    )
+)
+
+# Average daily net sales for the selected viewing period.
+average_sales_line = (
+    alt.Chart(
+        pd.DataFrame({
+            "average_net_sales": [selected_period_average],
+        })
+    )
+    .mark_rule(
+        color="#0f3d66",
+        strokeWidth=2,
+        strokeDash=[8, 5],
+    )
+    .encode(
+        y=alt.Y(
+            "average_net_sales:Q",
+            axis=None,
+            scale=alt.Scale(
+                domain=[0, sales_axis_max],
+            ),
+        ),
+        tooltip=[
+            alt.Tooltip(
+                "average_net_sales:Q",
+                title="Average Daily Net Sales",
                 format="$,.2f",
             ),
         ],
@@ -414,7 +478,10 @@ growth_line = (
                 labelExpr="datum.value + '%'",
                 titleColor="#ff7f0e",
             ),
-            scale=alt.Scale(zero=False),
+            scale=alt.Scale(
+                domain=[growth_axis_min, growth_axis_max],
+                zero=False,
+            ),
         ),
         tooltip=[
             alt.Tooltip(
@@ -431,10 +498,39 @@ growth_line = (
     )
 )
 
+# A 0% reference separates positive from negative growth.
+zero_growth_line = (
+    alt.Chart(pd.DataFrame({"zero_growth": [0.0]}))
+    .mark_rule(
+        color="#6b7280",
+        strokeWidth=2,
+        strokeDash=[5, 5],
+    )
+    .encode(
+        y=alt.Y(
+            "zero_growth:Q",
+            axis=None,
+            scale=alt.Scale(
+                domain=[growth_axis_min, growth_axis_max],
+                zero=False,
+            ),
+        ),
+        tooltip=[
+            alt.Tooltip(
+                "zero_growth:Q",
+                title="Growth Reference",
+                format=".0f",
+            ),
+        ],
+    )
+)
+
 combined_chart = (
     alt.layer(
         sales_bars,
+        average_sales_line,
         growth_line,
+        zero_growth_line,
     )
     .resolve_scale(y="independent")
     .properties(height=475)
@@ -449,6 +545,8 @@ st.altair_chart(
 st.caption(
     "Blue bars show daily net sales. The orange line shows "
     "the latest 30 days compared with the preceding 30 days. "
+    "The dashed navy line is average daily net sales for the "
+    "selected period, and the dashed gray line marks 0% growth. "
     "The growth line begins once 60 days of data are available."
 )
 

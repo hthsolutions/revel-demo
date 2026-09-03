@@ -199,6 +199,181 @@ metric_columns[3].metric(
     help=latest_business_date,
 )
 
+# ---------------------------------------------------------
+# Rolling 30-day net-sales growth
+# ---------------------------------------------------------
+
+# Combine records by business date in case multiple locations
+# are included in the current filter.
+daily_sales_df = (
+    filtered_df
+    .groupby("business_date", as_index=False)["net_sales"]
+    .sum()
+    .sort_values("business_date")
+)
+
+# Create a continuous daily date range so the calculation
+# represents calendar days, even if a date is missing.
+complete_date_range = pd.date_range(
+    start=daily_sales_df["business_date"].min(),
+    end=daily_sales_df["business_date"].max(),
+    freq="D",
+)
+
+rolling_df = (
+    daily_sales_df
+    .set_index("business_date")
+    .reindex(complete_date_range)
+    .rename_axis("business_date")
+    .reset_index()
+)
+
+# Missing dates remain null so incomplete periods are not
+# incorrectly treated as days with zero sales.
+rolling_df["rolling_30_day_sales"] = (
+    rolling_df["net_sales"]
+    .rolling(
+        window=30,
+        min_periods=30,
+    )
+    .sum()
+)
+
+rolling_df["previous_30_day_sales"] = (
+    rolling_df["rolling_30_day_sales"].shift(30)
+)
+
+rolling_df["rolling_30_day_growth"] = (
+    (
+        rolling_df["rolling_30_day_sales"]
+        - rolling_df["previous_30_day_sales"]
+    )
+    / rolling_df["previous_30_day_sales"]
+    * 100
+)
+
+valid_growth_df = rolling_df.dropna(
+    subset=[
+        "rolling_30_day_sales",
+        "previous_30_day_sales",
+        "rolling_30_day_growth",
+    ]
+)
+
+st.subheader("Rolling 30-Day Performance")
+
+if valid_growth_df.empty:
+    st.info(
+        "At least 60 consecutive days of sales data are needed "
+        "to calculate rolling 30-day growth."
+    )
+else:
+    latest_growth_row = valid_growth_df.iloc[-1]
+
+    current_30_day_sales = latest_growth_row[
+        "rolling_30_day_sales"
+    ]
+
+    previous_30_day_sales = latest_growth_row[
+        "previous_30_day_sales"
+    ]
+
+    rolling_30_day_growth = latest_growth_row[
+        "rolling_30_day_growth"
+    ]
+
+    growth_period_end = latest_growth_row[
+        "business_date"
+    ].strftime("%B %d, %Y")
+
+    growth_columns = st.columns(3)
+
+    growth_columns[0].metric(
+        "Latest 30-Day Net Sales",
+        f"${current_30_day_sales:,.2f}",
+        help=f"30-day period ending {growth_period_end}",
+    )
+
+    growth_columns[1].metric(
+        "Previous 30-Day Net Sales",
+        f"${previous_30_day_sales:,.2f}",
+    )
+
+    growth_columns[2].metric(
+        "Rolling 30-Day Growth",
+        f"{rolling_30_day_growth:+.2f}%",
+        delta=f"{rolling_30_day_growth:+.2f}%",
+        help=(
+            "Latest 30 days compared with the immediately "
+            "preceding 30 days."
+        ),
+    )
+
+    growth_chart = (
+        alt.Chart(valid_growth_df)
+        .mark_line(
+            point=True,
+            strokeWidth=3,
+        )
+        .encode(
+            x=alt.X(
+                "business_date:T",
+                title="Period End Date",
+                axis=alt.Axis(format="%b %d"),
+            ),
+            y=alt.Y(
+                "rolling_30_day_growth:Q",
+                title="30-Day Growth",
+                axis=alt.Axis(format=".1f"),
+            ),
+            color=alt.condition(
+                "datum.rolling_30_day_growth >= 0",
+                alt.value("#16a34a"),
+                alt.value("#dc2626"),
+            ),
+            tooltip=[
+                alt.Tooltip(
+                    "business_date:T",
+                    title="Period End",
+                    format="%B %d, %Y",
+                ),
+                alt.Tooltip(
+                    "rolling_30_day_sales:Q",
+                    title="Latest 30 Days",
+                    format="$,.2f",
+                ),
+                alt.Tooltip(
+                    "previous_30_day_sales:Q",
+                    title="Previous 30 Days",
+                    format="$,.2f",
+                ),
+                alt.Tooltip(
+                    "rolling_30_day_growth:Q",
+                    title="Growth",
+                    format=".2f",
+                ),
+            ],
+        )
+        .properties(height=325)
+    )
+
+    zero_line = (
+        alt.Chart(pd.DataFrame({"growth": [0]}))
+        .mark_rule(
+            color="gray",
+            strokeDash=[5, 5],
+        )
+        .encode(y="growth:Q")
+    )
+
+    st.altair_chart(
+        growth_chart + zero_line,
+        use_container_width=True,
+    )
+
+
+
+
 
 # ---------------------------------------------------------
 # Net-sales chart

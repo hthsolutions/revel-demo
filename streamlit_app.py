@@ -1,4 +1,5 @@
-from datetime import date
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import altair as alt
 import pandas as pd
@@ -115,18 +116,54 @@ selected_location = st.sidebar.selectbox(
 minimum_date = sales_df["business_date"].min().date()
 maximum_date = sales_df["business_date"].max().date()
 
-selected_dates = st.sidebar.date_input(
+date_range_option = st.sidebar.selectbox(
     "Business date range",
-    value=(minimum_date, maximum_date),
-    min_value=minimum_date,
-    max_value=maximum_date,
+    options=[
+        "Today",
+        "Yesterday",
+        "Last 7 days",
+        "Last 30 days",
+        "Custom range",
+    ],
+    index=2,
 )
 
-if len(selected_dates) == 2:
-    selected_start_date, selected_end_date = selected_dates
+# Streamlit Community Cloud runs in UTC. Use Central Time so
+# presets follow the restaurant's local business date.
+central_today = datetime.now(
+    ZoneInfo("America/Chicago")
+).date()
+
+if date_range_option == "Today":
+    selected_start_date = central_today
+    selected_end_date = central_today
+elif date_range_option == "Yesterday":
+    selected_start_date = central_today - timedelta(days=1)
+    selected_end_date = selected_start_date
+elif date_range_option == "Last 7 days":
+    selected_start_date = central_today - timedelta(days=6)
+    selected_end_date = central_today
+elif date_range_option == "Last 30 days":
+    selected_start_date = central_today - timedelta(days=29)
+    selected_end_date = central_today
 else:
-    selected_start_date = selected_dates[0]
-    selected_end_date = selected_dates[0]
+    selected_dates = st.sidebar.date_input(
+        "Custom dates",
+        value=(minimum_date, maximum_date),
+        min_value=minimum_date,
+        max_value=maximum_date,
+    )
+
+    if len(selected_dates) == 2:
+        selected_start_date, selected_end_date = selected_dates
+    else:
+        selected_start_date = selected_dates[0]
+        selected_end_date = selected_dates[0]
+
+st.sidebar.caption(
+    f"{selected_start_date:%b %d, %Y} – "
+    f"{selected_end_date:%b %d, %Y}"
+)
 
 if selected_start_date > selected_end_date:
     st.sidebar.error(

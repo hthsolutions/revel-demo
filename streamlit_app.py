@@ -8,7 +8,7 @@ from supabase import Client, create_client
 
 st.set_page_config(
     page_title="Revel Sales Dashboard",
-    page_icon="ðŸ“ˆ",
+    page_icon="📈",
     layout="wide",
 )
 
@@ -135,21 +135,26 @@ if selected_start_date > selected_end_date:
     st.stop()
 
 
-filtered_df = sales_df[
+# Filter by location first while retaining the complete date history.
+# Rolling calculations use this full location-level dataset.
+location_df = sales_df.copy()
+
+if selected_location != "All Locations":
+    location_df = location_df[
+        location_df["location"] == selected_location
+    ].copy()
+
+# The selected date range controls only the displayed records.
+filtered_df = location_df[
     (
-        sales_df["business_date"].dt.date
+        location_df["business_date"].dt.date
         >= selected_start_date
     )
     & (
-        sales_df["business_date"].dt.date
+        location_df["business_date"].dt.date
         <= selected_end_date
     )
 ].copy()
-
-if selected_location != "All Locations":
-    filtered_df = filtered_df[
-        filtered_df["location"] == selected_location
-    ].copy()
 
 
 if filtered_df.empty:
@@ -203,8 +208,15 @@ metric_columns[3].metric(
 # Rolling 30-day net-sales growth
 # ---------------------------------------------------------
 
-# Combine records by business date in case multiple locations
-# are included in the current filter.
+# Aggregate the complete location history for rolling calculations.
+daily_history_df = (
+    location_df
+    .groupby("business_date", as_index=False)["net_sales"]
+    .sum()
+    .sort_values("business_date")
+)
+
+# Aggregate only the selected viewing period for the chart.
 daily_sales_df = (
     filtered_df
     .groupby("business_date", as_index=False)["net_sales"]
@@ -215,13 +227,13 @@ daily_sales_df = (
 # Create a continuous daily date range so the calculation
 # represents calendar days, even if a date is missing.
 complete_date_range = pd.date_range(
-    start=daily_sales_df["business_date"].min(),
-    end=daily_sales_df["business_date"].max(),
+    start=daily_history_df["business_date"].min(),
+    end=daily_history_df["business_date"].max(),
     freq="D",
 )
 
 rolling_df = (
-    daily_sales_df
+    daily_history_df
     .set_index("business_date")
     .reindex(complete_date_range)
     .rename_axis("business_date")
@@ -258,17 +270,31 @@ valid_growth_df = rolling_df.dropna(
         "previous_30_day_sales",
         "rolling_30_day_growth",
     ]
-)
+).copy()
+
+# Restrict displayed growth results to the selected viewing period.
+# The underlying values still use all available historical data.
+visible_growth_df = valid_growth_df[
+    (
+        valid_growth_df["business_date"].dt.date
+        >= selected_start_date
+    )
+    & (
+        valid_growth_df["business_date"].dt.date
+        <= selected_end_date
+    )
+].copy()
 
 st.subheader("Rolling 30-Day Performance")
 
-if valid_growth_df.empty:
+if visible_growth_df.empty:
     st.info(
-        "At least 60 consecutive days of sales data are needed "
-        "to calculate rolling 30-day growth."
+        "Rolling 30-day growth is unavailable for the selected "
+        "dates. The database needs at least 60 days of history "
+        "ending within this viewing period."
     )
 else:
-    latest_growth_row = valid_growth_df.iloc[-1]
+    latest_growth_row = visible_growth_df.iloc[-1]
 
     current_30_day_sales = latest_growth_row[
         "rolling_30_day_sales"
@@ -411,7 +437,8 @@ combined_chart = (
         growth_line,
     )
     .resolve_scale(y="independent")
-    .properties(height=425)
+    .properties(height=475)
+    .interactive()
 )
 
 st.altair_chart(

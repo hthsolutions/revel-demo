@@ -8,7 +8,7 @@ from supabase import Client, create_client
 
 st.set_page_config(
     page_title="Revel Sales Dashboard",
-    page_icon="📈",
+    page_icon="ðŸ“ˆ",
     layout="wide",
 )
 
@@ -309,83 +309,30 @@ else:
         ),
     )
 
-    growth_chart = (
-        alt.Chart(valid_growth_df)
-        .mark_line(
-            point=True,
-            strokeWidth=3,
-        )
-        .encode(
-            x=alt.X(
-                "business_date:T",
-                title="Period End Date",
-                axis=alt.Axis(format="%b %d"),
-            ),
-            y=alt.Y(
-                "rolling_30_day_growth:Q",
-                title="30-Day Growth",
-                axis=alt.Axis(format=".1f"),
-            ),
-            color=alt.condition(
-                "datum.rolling_30_day_growth >= 0",
-                alt.value("#16a34a"),
-                alt.value("#dc2626"),
-            ),
-            tooltip=[
-                alt.Tooltip(
-                    "business_date:T",
-                    title="Period End",
-                    format="%B %d, %Y",
-                ),
-                alt.Tooltip(
-                    "rolling_30_day_sales:Q",
-                    title="Latest 30 Days",
-                    format="$,.2f",
-                ),
-                alt.Tooltip(
-                    "previous_30_day_sales:Q",
-                    title="Previous 30 Days",
-                    format="$,.2f",
-                ),
-                alt.Tooltip(
-                    "rolling_30_day_growth:Q",
-                    title="Growth",
-                    format=".2f",
-                ),
-            ],
-        )
-        .properties(height=325)
-    )
-
-    zero_line = (
-        alt.Chart(pd.DataFrame({"growth": [0]}))
-        .mark_rule(
-            color="gray",
-            strokeDash=[5, 5],
-        )
-        .encode(y="growth:Q")
-    )
-
-    st.altair_chart(
-        growth_chart + zero_line,
-        use_container_width=True,
-    )
-
-
-
-
-
 # ---------------------------------------------------------
-# Net-sales chart
+# Daily net sales with rolling growth overlay
 # ---------------------------------------------------------
 
-st.subheader("Daily Net Sales")
+st.subheader("Daily Net Sales and Rolling 30-Day Growth")
 
-chart = (
-    alt.Chart(filtered_df)
-    .mark_line(
-        point=True,
-        strokeWidth=3,
+# Join rolling growth to the aggregated daily-sales data.
+chart_df = daily_sales_df.merge(
+    rolling_df[
+        [
+            "business_date",
+            "rolling_30_day_growth",
+        ]
+    ],
+    on="business_date",
+    how="left",
+)
+
+# Daily net sales use bars and the left dollar axis.
+sales_bars = (
+    alt.Chart(chart_df)
+    .mark_bar(
+        color="#1f77b4",
+        opacity=0.75,
     )
     .encode(
         x=alt.X(
@@ -395,13 +342,11 @@ chart = (
         ),
         y=alt.Y(
             "net_sales:Q",
-            title="Net Sales",
-            axis=alt.Axis(format="$,.0f"),
-            scale=alt.Scale(zero=False),
-        ),
-        color=alt.Color(
-            "location:N",
-            title="Location",
+            title="Daily Net Sales",
+            axis=alt.Axis(
+                format="$,.0f",
+                titleColor="#1f77b4",
+            ),
         ),
         tooltip=[
             alt.Tooltip(
@@ -410,23 +355,75 @@ chart = (
                 format="%B %d, %Y",
             ),
             alt.Tooltip(
-                "location:N",
-                title="Location",
-            ),
-            alt.Tooltip(
                 "net_sales:Q",
-                title="Net Sales",
+                title="Daily Net Sales",
                 format="$,.2f",
             ),
         ],
     )
+)
+
+# Rolling growth uses a line and the right percentage axis.
+growth_line = (
+    alt.Chart(chart_df)
+    .mark_line(
+        color="#ff7f0e",
+        strokeWidth=3,
+        point=alt.OverlayMarkDef(
+            color="#ff7f0e",
+            size=45,
+        ),
+    )
+    .encode(
+        x=alt.X(
+            "business_date:T",
+            title="Business Date",
+        ),
+        y=alt.Y(
+            "rolling_30_day_growth:Q",
+            title="Rolling 30-Day Growth",
+            axis=alt.Axis(
+                orient="right",
+                format=".1f",
+                labelExpr="datum.value + '%'",
+                titleColor="#ff7f0e",
+            ),
+            scale=alt.Scale(zero=False),
+        ),
+        tooltip=[
+            alt.Tooltip(
+                "business_date:T",
+                title="Period End",
+                format="%B %d, %Y",
+            ),
+            alt.Tooltip(
+                "rolling_30_day_growth:Q",
+                title="30-Day Growth (%)",
+                format="+.2f",
+            ),
+        ],
+    )
+)
+
+combined_chart = (
+    alt.layer(
+        sales_bars,
+        growth_line,
+    )
+    .resolve_scale(y="independent")
     .properties(height=475)
     .interactive()
 )
 
 st.altair_chart(
-    chart,
+    combined_chart,
     use_container_width=True,
+)
+
+st.caption(
+    "Blue bars show daily net sales. The orange line shows "
+    "the latest 30 days compared with the preceding 30 days. "
+    "The growth line begins once 60 days of data are available."
 )
 
 

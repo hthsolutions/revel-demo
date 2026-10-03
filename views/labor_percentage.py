@@ -31,6 +31,37 @@ WEEKLY_SUM_COLUMNS = [
 ]
 
 
+LABOR_TYPE_LABELS = {
+    "hourly_labor": "Hourly",
+    "salary_labor": "Salaried",
+}
+
+LABOR_TYPE_COLORS = alt.Scale(
+    domain=list(LABOR_TYPE_LABELS.values()),
+    range=["#1f77b4", "#9467bd"],
+)
+
+
+def stack_labor_types(
+    frame: pd.DataFrame,
+    id_columns: list[str],
+) -> pd.DataFrame:
+    """Reshape to one row per labor type for stacked bars."""
+
+    long_df = frame.melt(
+        id_vars=id_columns,
+        value_vars=list(LABOR_TYPE_LABELS.keys()),
+        var_name="labor_type",
+        value_name="labor_dollars",
+    )
+
+    long_df["labor_type"] = long_df["labor_type"].map(
+        LABOR_TYPE_LABELS
+    )
+
+    return long_df
+
+
 def safe_ratio(
     numerator: pd.Series,
     denominator: pd.Series,
@@ -213,16 +244,28 @@ target_labor_percent = st.sidebar.number_input(
     step=0.5,
 )
 
-payroll_burden_percent = st.sidebar.number_input(
-    "Payroll burden %",
+hourly_burden_percent = st.sidebar.number_input(
+    "Hourly burden %",
     min_value=0.0,
     max_value=100.0,
     value=0.0,
     step=0.5,
     help=(
-        "Optional uplift for employer taxes and benefits, "
-        "applied to hourly and salaried pay alike. Leave at "
-        "0 to report straight wages."
+        "Optional uplift on hourly shift wages for employer "
+        "taxes and benefits. Leave at 0 to report straight "
+        "wages."
+    ),
+)
+
+salary_burden_percent = st.sidebar.number_input(
+    "Salaried burden %",
+    min_value=0.0,
+    max_value=100.0,
+    value=0.0,
+    step=0.5,
+    help=(
+        "Optional uplift on salaried pay for employer taxes "
+        "and benefits. Leave at 0 to report straight salary."
     ),
 )
 
@@ -251,16 +294,17 @@ if labor_df.empty:
 # Labor dollars, hours, and rate
 # ---------------------------------------------------------
 
-burden_multiplier = 1.0 + payroll_burden_percent / 100.0
+hourly_multiplier = 1.0 + hourly_burden_percent / 100.0
+salary_multiplier = 1.0 + salary_burden_percent / 100.0
 
 labor_df["hourly_labor"] = (
-    labor_df["hourly_wages"] * burden_multiplier
+    labor_df["hourly_wages"] * hourly_multiplier
 )
 labor_df["salary_labor"] = (
-    labor_df["salary_wages"] * burden_multiplier
+    labor_df["salary_wages"] * salary_multiplier
 )
 labor_df["ot_labor"] = (
-    labor_df["ot_wages"] * burden_multiplier
+    labor_df["ot_wages"] * hourly_multiplier
 )
 labor_df["total_labor"] = (
     labor_df["hourly_labor"] + labor_df["salary_labor"]
@@ -534,10 +578,12 @@ st.caption(
     )
 )
 
-if payroll_burden_percent > 0:
+if hourly_burden_percent > 0 or salary_burden_percent > 0:
     st.caption(
-        f"All labor dollars include a "
-        f"{payroll_burden_percent:.1f}% payroll burden."
+        "Labor dollars include a "
+        f"{hourly_burden_percent:.1f}% burden on hourly pay "
+        f"and a {salary_burden_percent:.1f}% burden on "
+        "salaried pay."
     )
 
 if previous_week is None:
@@ -622,9 +668,20 @@ else:
     )
     percent_axis_max = raw_percent_max + percent_padding
 
+weekly_stacked_df = stack_labor_types(
+    visible_weeks_df,
+    [
+        "week_label",
+        "is_complete_week",
+        "total_labor",
+        "net_sales",
+        "days_counted",
+    ],
+)
+
 labor_dollar_bars = (
-    alt.Chart(visible_weeks_df)
-    .mark_bar(color="#1f77b4")
+    alt.Chart(weekly_stacked_df)
+    .mark_bar()
     .encode(
         x=alt.X(
             "week_label:N",
@@ -632,37 +689,36 @@ labor_dollar_bars = (
             sort=week_label_order,
         ),
         y=alt.Y(
-            "total_labor:Q",
+            "labor_dollars:Q",
             title="Total Labor",
-            axis=alt.Axis(
-                format="$,.0f",
-                titleColor="#1f77b4",
-            ),
+            stack="zero",
+            axis=alt.Axis(format="$,.0f"),
             scale=alt.Scale(domain=[0, labor_axis_max]),
+        ),
+        color=alt.Color(
+            "labor_type:N",
+            title="Labor Type",
+            scale=LABOR_TYPE_COLORS,
         ),
         opacity=alt.condition(
             alt.datum.is_complete_week,
-            alt.value(0.8),
-            alt.value(0.35),
+            alt.value(0.85),
+            alt.value(0.4),
         ),
         tooltip=[
             alt.Tooltip(
                 "week_label:N",
                 title="Week Starting",
             ),
+            alt.Tooltip("labor_type:N", title="Labor Type"),
+            alt.Tooltip(
+                "labor_dollars:Q",
+                title="Segment",
+                format="$,.2f",
+            ),
             alt.Tooltip(
                 "total_labor:Q",
                 title="Total Labor",
-                format="$,.2f",
-            ),
-            alt.Tooltip(
-                "hourly_labor:Q",
-                title="Hourly",
-                format="$,.2f",
-            ),
-            alt.Tooltip(
-                "salary_labor:Q",
-                title="Salaried",
                 format="$,.2f",
             ),
             alt.Tooltip(
@@ -767,10 +823,11 @@ st.altair_chart(
 )
 
 st.caption(
-    "Blue bars show total labor dollars on the left axis. "
-    "The orange line shows labor as a percent of net sales "
-    "on the right axis, and the dashed green line is the "
-    "target rate."
+    "Bars show labor dollars on the left axis, split into "
+    "hourly (blue) and salaried (purple) pay. The orange "
+    "line shows labor as a percent of net sales on the "
+    "right axis, and the dashed green line is the target "
+    "rate."
 )
 
 
@@ -778,7 +835,7 @@ st.caption(
 # Daily detail across the visible weeks
 # ---------------------------------------------------------
 
-st.subheader("Daily Net Sales and Labor Rate")
+st.subheader("Daily Labor Dollars and Labor Rate")
 
 visible_week_starts = set(visible_weeks_df["week_start"])
 
@@ -798,24 +855,43 @@ daily_axis = alt.X(
     ),
 )
 
-daily_sales_bars = (
-    alt.Chart(visible_daily_df)
-    .mark_bar(color="#1f77b4", opacity=0.7)
+daily_stacked_df = stack_labor_types(
+    visible_daily_df,
+    [
+        "business_date",
+        "net_sales",
+        "total_labor",
+        "labor_percent",
+    ],
+)
+
+daily_labor_bars = (
+    alt.Chart(daily_stacked_df)
+    .mark_bar(opacity=0.85)
     .encode(
         x=daily_axis,
         y=alt.Y(
-            "net_sales:Q",
-            title="Net Sales",
-            axis=alt.Axis(
-                format="$,.0f",
-                titleColor="#1f77b4",
-            ),
+            "labor_dollars:Q",
+            title="Labor Dollars",
+            stack="zero",
+            axis=alt.Axis(format="$,.0f"),
+        ),
+        color=alt.Color(
+            "labor_type:N",
+            title="Labor Type",
+            scale=LABOR_TYPE_COLORS,
         ),
         tooltip=[
             alt.Tooltip(
                 "business_date:T",
                 title="Business Date",
                 format="%B %d, %Y",
+            ),
+            alt.Tooltip("labor_type:N", title="Labor Type"),
+            alt.Tooltip(
+                "labor_dollars:Q",
+                title="Segment",
+                format="$,.2f",
             ),
             alt.Tooltip(
                 "net_sales:Q",
@@ -875,7 +951,7 @@ daily_percent_line = (
 )
 
 daily_chart = (
-    alt.layer(daily_sales_bars, daily_percent_line)
+    alt.layer(daily_labor_bars, daily_percent_line)
     .resolve_scale(y="independent")
     .properties(height=400)
 )
@@ -883,7 +959,9 @@ daily_chart = (
 st.altair_chart(daily_chart, use_container_width=True)
 
 st.caption(
-    "Low-volume days carry the same fixed salaried cost as "
+    "Bars show each day's hourly and salaried labor dollars; "
+    "hover a bar for that day's net sales. Low-volume days "
+    "carry the same fixed salaried cost as "
     "busy days, so the labor rate usually spikes on the "
     "slowest days."
 )
@@ -917,11 +995,16 @@ if not shift_df.empty:
     ]
 
     if not hourly_roles_df.empty:
-        role_frames.append(
+        hourly_roles_df = (
             hourly_roles_df
             .groupby(["week_start", "role"], as_index=False)
             .agg(labor_dollars=("shift_wages", "sum"))
         )
+        hourly_roles_df["labor_dollars"] = (
+            hourly_roles_df["labor_dollars"]
+            * hourly_multiplier
+        )
+        role_frames.append(hourly_roles_df)
 
 if not salary_df.empty:
     salary_roles_df = salary_df.copy()
@@ -951,6 +1034,10 @@ if not salary_df.empty:
             .groupby(["week_start", "role"], as_index=False)
             .agg(labor_dollars=("daily_salary", "sum"))
         )
+        salary_roles_df["labor_dollars"] = (
+            salary_roles_df["labor_dollars"]
+            * salary_multiplier
+        )
         salary_roles_df["role"] = (
             salary_roles_df["role"] + " (salary)"
         )
@@ -963,10 +1050,6 @@ if not role_frames:
     )
 else:
     role_df = pd.concat(role_frames, ignore_index=True)
-
-    role_df["labor_dollars"] = (
-        role_df["labor_dollars"] * burden_multiplier
-    )
 
     role_df["week_label"] = role_df[
         "week_start"

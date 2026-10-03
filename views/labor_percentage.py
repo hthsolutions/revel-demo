@@ -62,6 +62,18 @@ def stack_labor_types(
     return long_df
 
 
+def percent_of_sales(labor_dollars, net_sales) -> float:
+    """Labor dollars as a percent of sales, or NaN."""
+
+    if pd.isna(labor_dollars) or pd.isna(net_sales):
+        return NOT_AVAILABLE
+
+    if net_sales == 0:
+        return NOT_AVAILABLE
+
+    return labor_dollars / net_sales * 100
+
+
 def safe_ratio(
     numerator: pd.Series,
     denominator: pd.Series,
@@ -236,37 +248,30 @@ match_partial_week = st.sidebar.checkbox(
     ),
 )
 
-target_labor_percent = st.sidebar.number_input(
+hourly_target_percent = st.sidebar.number_input(
+    "Hourly labor %",
+    min_value=0.0,
+    max_value=100.0,
+    value=20.0,
+    step=0.5,
+    help="Target for hourly shift wages as a percent of net sales.",
+)
+
+gm_target_percent = st.sidebar.number_input(
+    "GM labor %",
+    min_value=0.0,
+    max_value=100.0,
+    value=5.0,
+    step=0.5,
+    help="Target for GM salary as a percent of net sales.",
+)
+
+target_labor_percent = hourly_target_percent + gm_target_percent
+
+st.sidebar.metric(
     "Target labor %",
-    min_value=0.0,
-    max_value=100.0,
-    value=25.0,
-    step=0.5,
-)
-
-hourly_burden_percent = st.sidebar.number_input(
-    "Hourly burden %",
-    min_value=0.0,
-    max_value=100.0,
-    value=0.0,
-    step=0.5,
-    help=(
-        "Optional uplift on hourly shift wages for employer "
-        "taxes and benefits. Leave at 0 to report straight "
-        "wages."
-    ),
-)
-
-salary_burden_percent = st.sidebar.number_input(
-    "Salaried burden %",
-    min_value=0.0,
-    max_value=100.0,
-    value=0.0,
-    step=0.5,
-    help=(
-        "Optional uplift on salaried pay for employer taxes "
-        "and benefits. Leave at 0 to report straight salary."
-    ),
+    f"{target_labor_percent:.1f}%",
+    help="Hourly labor % plus GM labor %.",
 )
 
 if selected_location != "All Locations":
@@ -294,18 +299,9 @@ if labor_df.empty:
 # Labor dollars, hours, and rate
 # ---------------------------------------------------------
 
-hourly_multiplier = 1.0 + hourly_burden_percent / 100.0
-salary_multiplier = 1.0 + salary_burden_percent / 100.0
-
-labor_df["hourly_labor"] = (
-    labor_df["hourly_wages"] * hourly_multiplier
-)
-labor_df["salary_labor"] = (
-    labor_df["salary_wages"] * salary_multiplier
-)
-labor_df["ot_labor"] = (
-    labor_df["ot_wages"] * hourly_multiplier
-)
+labor_df["hourly_labor"] = labor_df["hourly_wages"]
+labor_df["salary_labor"] = labor_df["salary_wages"]
+labor_df["ot_labor"] = labor_df["ot_wages"]
 labor_df["total_labor"] = (
     labor_df["hourly_labor"] + labor_df["salary_labor"]
 )
@@ -569,22 +565,33 @@ salary_label = format_metric_value(
     "currency",
 )
 
+current_hourly_percent = format_metric_value(
+    percent_of_sales(
+        current_week["hourly_labor"],
+        current_week["net_sales"],
+    ),
+    "percent",
+)
+
+current_gm_percent = format_metric_value(
+    percent_of_sales(
+        current_week["salary_labor"],
+        current_week["net_sales"],
+    ),
+    "percent",
+)
+
 st.caption(
     escape_dollar_signs(
         f"Previous week was {previous_label}. Target is "
-        f"{target_labor_percent:.1f}%. Hourly pay "
-        f"contributed {hourly_label} and salaried pay "
-        f"contributed {salary_label}."
+        f"{target_labor_percent:.1f}% "
+        f"({hourly_target_percent:.1f}% hourly + "
+        f"{gm_target_percent:.1f}% GM). Hourly pay was "
+        f"{hourly_label} ({current_hourly_percent} of net "
+        f"sales) and GM salary was {salary_label} "
+        f"({current_gm_percent})."
     )
 )
-
-if hourly_burden_percent > 0 or salary_burden_percent > 0:
-    st.caption(
-        "Labor dollars include a "
-        f"{hourly_burden_percent:.1f}% burden on hourly pay "
-        f"and a {salary_burden_percent:.1f}% burden on "
-        "salaried pay."
-    )
 
 if previous_week is None:
     st.info(
@@ -827,7 +834,7 @@ st.caption(
     "hourly (blue) and salaried (purple) pay. The orange "
     "line shows labor as a percent of net sales on the "
     "right axis, and the dashed green line is the target "
-    "rate."
+    "rate (hourly labor % plus GM labor %)."
 )
 
 
@@ -995,16 +1002,11 @@ if not shift_df.empty:
     ]
 
     if not hourly_roles_df.empty:
-        hourly_roles_df = (
+        role_frames.append(
             hourly_roles_df
             .groupby(["week_start", "role"], as_index=False)
             .agg(labor_dollars=("shift_wages", "sum"))
         )
-        hourly_roles_df["labor_dollars"] = (
-            hourly_roles_df["labor_dollars"]
-            * hourly_multiplier
-        )
-        role_frames.append(hourly_roles_df)
 
 if not salary_df.empty:
     salary_roles_df = salary_df.copy()
@@ -1033,10 +1035,6 @@ if not salary_df.empty:
             salary_roles_df
             .groupby(["week_start", "role"], as_index=False)
             .agg(labor_dollars=("daily_salary", "sum"))
-        )
-        salary_roles_df["labor_dollars"] = (
-            salary_roles_df["labor_dollars"]
-            * salary_multiplier
         )
         salary_roles_df["role"] = (
             salary_roles_df["role"] + " (salary)"

@@ -1417,15 +1417,27 @@ ot_input_column, _ = st.columns([1, 3])
 with ot_input_column:
     ot_hours_target = st.number_input(
         "OT Labor Hours",
-        value=None,
+        value=0.0,
         step=1.0,
         help=(
-            "Draws a dashed horizontal line at this many "
-            "overtime hours on the right axis."
+            "Weeks at or below this many overtime hours "
+            "are green. Weeks above it are red. Also draws "
+            "a dashed line at this value on the right axis."
         ),
     )
 
-ot_labor_peak = visible_weeks_df["ot_labor"].max()
+# Clearing the box leaves the threshold at zero.
+if ot_hours_target is None:
+    ot_hours_target = 0.0
+
+ot_hours_target = float(ot_hours_target)
+
+ot_chart_df = visible_weeks_df.copy()
+ot_chart_df["within_ot_threshold"] = (
+    ot_chart_df["ot_hours"] <= ot_hours_target
+)
+
+ot_labor_peak = ot_chart_df["ot_labor"].max()
 
 if pd.isna(ot_labor_peak) or ot_labor_peak <= 0:
     ot_labor_axis_max = 1.0
@@ -1433,13 +1445,11 @@ else:
     ot_labor_axis_max = float(ot_labor_peak) * 1.08
 
 ot_hours_candidates = [
-    visible_weeks_df["ot_hours"].min(),
-    visible_weeks_df["ot_hours"].max(),
+    ot_chart_df["ot_hours"].min(),
+    ot_chart_df["ot_hours"].max(),
     0.0,
+    ot_hours_target,
 ]
-
-if ot_hours_target is not None:
-    ot_hours_candidates.append(float(ot_hours_target))
 
 ot_hours_candidates = [
     float(value)
@@ -1468,8 +1478,8 @@ ot_hours_scale = alt.Scale(
 )
 
 ot_labor_bars = (
-    alt.Chart(visible_weeks_df)
-    .mark_bar(color="#d62728")
+    alt.Chart(ot_chart_df)
+    .mark_bar()
     .encode(
         x=alt.X(
             "week_label:N",
@@ -1481,6 +1491,11 @@ ot_labor_bars = (
             title="Total OT Labor $",
             axis=alt.Axis(format="$,.0f"),
             scale=ot_labor_scale,
+        ),
+        color=alt.condition(
+            alt.datum.within_ot_threshold,
+            alt.value("#2ca02c"),
+            alt.value("#d62728"),
         ),
         opacity=alt.condition(
             alt.datum.is_complete_week,
@@ -1512,7 +1527,7 @@ ot_labor_bars = (
 )
 
 ot_hours_line = (
-    alt.Chart(visible_weeks_df)
+    alt.Chart(ot_chart_df)
     .mark_line(
         color="#1f77b4",
         strokeWidth=2.5,
@@ -1555,36 +1570,38 @@ ot_hours_line = (
     )
 )
 
-ot_chart_layers = [ot_labor_bars, ot_hours_line]
+ot_hours_target_df = pd.DataFrame(
+    {"ot_hours_target": [ot_hours_target]}
+)
 
-if ot_hours_target is not None:
-    ot_hours_target_df = pd.DataFrame(
-        {"ot_hours_target": [float(ot_hours_target)]}
+ot_hours_target_rule = (
+    alt.Chart(ot_hours_target_df)
+    .mark_rule(
+        color="#1f77b4",
+        strokeWidth=2,
+        strokeDash=[8, 5],
     )
-
-    ot_hours_target_rule = (
-        alt.Chart(ot_hours_target_df)
-        .mark_rule(
-            color="#1f77b4",
-            strokeWidth=2,
-            strokeDash=[8, 5],
-        )
-        .encode(
-            y=alt.Y(
+    .encode(
+        y=alt.Y(
+            "ot_hours_target:Q",
+            axis=None,
+            scale=ot_hours_scale,
+        ),
+        tooltip=[
+            alt.Tooltip(
                 "ot_hours_target:Q",
-                axis=None,
-                scale=ot_hours_scale,
+                title="OT Labor Hours",
+                format=",.1f",
             ),
-            tooltip=[
-                alt.Tooltip(
-                    "ot_hours_target:Q",
-                    title="OT Labor Hours",
-                    format=",.1f",
-                ),
-            ],
-        )
+        ],
     )
-    ot_chart_layers.append(ot_hours_target_rule)
+)
+
+ot_chart_layers = [
+    ot_labor_bars,
+    ot_hours_line,
+    ot_hours_target_rule,
+]
 
 ot_labor_chart = (
     alt.layer(*ot_chart_layers)
@@ -1596,9 +1613,10 @@ st.altair_chart(ot_labor_chart, use_container_width=True)
 
 st.caption(
     "Bars are total overtime pay on the left axis. "
-    "The line is total overtime hours on the right axis. "
-    "Enter OT Labor Hours to draw a dashed line at that "
-    "value on the hours axis."
+    "A bar is green when that week's overtime hours are "
+    "at or below OT Labor Hours, and red when they are "
+    "above. The line is total overtime hours on the right "
+    "axis, and the dashed line marks OT Labor Hours."
 )
 
 

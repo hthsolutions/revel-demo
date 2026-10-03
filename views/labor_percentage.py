@@ -41,6 +41,19 @@ LABOR_TYPE_COLORS = alt.Scale(
     range=["#1f77b4", "#9467bd"],
 )
 
+# Rate lines sit on the right axis. Total stays distinct
+# from the two bar colors so all three can be read at once.
+RATE_SERIES = {
+    "hourly_percent": "Hourly",
+    "gm_percent": "GM",
+    "labor_percent": "Total",
+}
+
+RATE_COLORS = alt.Scale(
+    domain=["Hourly", "GM", "Total"],
+    range=["#1f77b4", "#9467bd", "#ff7f0e"],
+)
+
 
 def stack_labor_types(
     frame: pd.DataFrame,
@@ -60,6 +73,46 @@ def stack_labor_types(
     )
 
     return long_df
+
+
+def melt_labor_rates(
+    frame: pd.DataFrame,
+    id_columns: list[str],
+) -> pd.DataFrame:
+    """One row per hourly, GM, and total labor rate."""
+
+    long_df = frame.melt(
+        id_vars=id_columns,
+        value_vars=list(RATE_SERIES.keys()),
+        var_name="rate_series",
+        value_name="rate_percent",
+    )
+
+    long_df["rate_series"] = long_df["rate_series"].map(
+        RATE_SERIES
+    )
+
+    return long_df
+
+
+def percent_axis_limits(
+    frame: pd.DataFrame,
+    extra_values: list[float],
+) -> tuple[float, float]:
+    """Y domain that fits every rate and every target."""
+
+    values = (
+        frame[list(RATE_SERIES.keys())]
+        .to_numpy(dtype=float)
+        .ravel()
+    )
+    values = values[~pd.isna(values)]
+    candidates = [*values.tolist(), *extra_values]
+
+    if not candidates or max(candidates) <= 0:
+        return 0.0, 1.0
+
+    return 0.0, max(candidates) * 1.08
 
 
 def percent_of_sales(labor_dollars, net_sales) -> float:
@@ -317,6 +370,22 @@ labor_df["labor_percent"] = (
     * 100
 )
 
+labor_df["hourly_percent"] = (
+    safe_ratio(
+        labor_df["hourly_labor"],
+        labor_df["net_sales"],
+    )
+    * 100
+)
+
+labor_df["gm_percent"] = (
+    safe_ratio(
+        labor_df["salary_labor"],
+        labor_df["net_sales"],
+    )
+    * 100
+)
+
 labor_df["sales_per_labor_hour"] = safe_ratio(
     labor_df["net_sales"],
     labor_df["labor_hours"],
@@ -417,6 +486,22 @@ weekly_df["days_counted"] = (
 weekly_df["labor_percent"] = (
     safe_ratio(
         weekly_df["total_labor"],
+        weekly_df["net_sales"],
+    )
+    * 100
+)
+
+weekly_df["hourly_percent"] = (
+    safe_ratio(
+        weekly_df["hourly_labor"],
+        weekly_df["net_sales"],
+    )
+    * 100
+)
+
+weekly_df["gm_percent"] = (
+    safe_ratio(
+        weekly_df["salary_labor"],
         weekly_df["net_sales"],
     )
     * 100
@@ -649,31 +734,25 @@ if pd.isna(weekly_labor_max) or weekly_labor_max <= 0:
 else:
     labor_axis_max = weekly_labor_max * 1.05
 
-visible_percent_values = visible_weeks_df[
-    "labor_percent"
-].dropna()
+percent_axis_min, percent_axis_max = percent_axis_limits(
+    visible_weeks_df,
+    [
+        hourly_target_percent,
+        gm_target_percent,
+        target_labor_percent,
+    ],
+)
 
-if visible_percent_values.empty:
-    percent_axis_min = 0.0
-    percent_axis_max = max(target_labor_percent * 1.5, 1.0)
-else:
-    raw_percent_min = min(
-        float(visible_percent_values.min()),
-        target_labor_percent,
-    )
-    raw_percent_max = max(
-        float(visible_percent_values.max()),
-        target_labor_percent,
-    )
-    percent_padding = max(
-        (raw_percent_max - raw_percent_min) * 0.15,
-        1.0,
-    )
-    percent_axis_min = max(
-        0.0,
-        raw_percent_min - percent_padding,
-    )
-    percent_axis_max = raw_percent_max + percent_padding
+target_df = pd.DataFrame(
+    {
+        "rate_series": ["Hourly", "GM", "Total"],
+        "target": [
+            float(hourly_target_percent),
+            float(gm_target_percent),
+            float(target_labor_percent),
+        ],
+    }
+)
 
 weekly_stacked_df = stack_labor_types(
     visible_weeks_df,
@@ -742,15 +821,21 @@ labor_dollar_bars = (
     )
 )
 
-labor_percent_line = (
-    alt.Chart(visible_weeks_df)
+weekly_rates_df = melt_labor_rates(
+    visible_weeks_df,
+    ["week_label"],
+)
+
+percent_scale = alt.Scale(
+    domain=[percent_axis_min, percent_axis_max],
+    zero=False,
+)
+
+labor_rate_lines = (
+    alt.Chart(weekly_rates_df)
     .mark_line(
-        color="#ff7f0e",
-        strokeWidth=3,
-        point=alt.OverlayMarkDef(
-            color="#ff7f0e",
-            size=55,
-        ),
+        strokeWidth=2.5,
+        point=alt.OverlayMarkDef(size=55),
     )
     .encode(
         x=alt.X(
@@ -759,18 +844,20 @@ labor_percent_line = (
             sort=week_label_order,
         ),
         y=alt.Y(
-            "labor_percent:Q",
+            "rate_percent:Q",
             title="Labor % of Net Sales",
             axis=alt.Axis(
                 orient="right",
                 format=".1f",
                 labelExpr="datum.value + '%'",
-                titleColor="#ff7f0e",
             ),
-            scale=alt.Scale(
-                domain=[percent_axis_min, percent_axis_max],
-                zero=False,
-            ),
+            scale=percent_scale,
+        ),
+        color=alt.Color(
+            "rate_series:N",
+            title="Labor %",
+            scale=RATE_COLORS,
+            sort=["Hourly", "GM", "Total"],
         ),
         tooltip=[
             alt.Tooltip(
@@ -778,7 +865,11 @@ labor_percent_line = (
                 title="Week Starting",
             ),
             alt.Tooltip(
-                "labor_percent:Q",
+                "rate_series:N",
+                title="Rate",
+            ),
+            alt.Tooltip(
+                "rate_percent:Q",
                 title="Labor %",
                 format=".2f",
             ),
@@ -786,12 +877,9 @@ labor_percent_line = (
     )
 )
 
-target_rule = (
-    alt.Chart(
-        pd.DataFrame({"target": [float(target_labor_percent)]})
-    )
+target_rules = (
+    alt.Chart(target_df)
     .mark_rule(
-        color="#15803d",
         strokeWidth=2,
         strokeDash=[8, 5],
     )
@@ -799,15 +887,21 @@ target_rule = (
         y=alt.Y(
             "target:Q",
             axis=None,
-            scale=alt.Scale(
-                domain=[percent_axis_min, percent_axis_max],
-                zero=False,
-            ),
+            scale=percent_scale,
+        ),
+        color=alt.Color(
+            "rate_series:N",
+            scale=RATE_COLORS,
+            legend=None,
         ),
         tooltip=[
             alt.Tooltip(
+                "rate_series:N",
+                title="Target",
+            ),
+            alt.Tooltip(
                 "target:Q",
-                title="Target Labor %",
+                title="Target %",
                 format=".1f",
             ),
         ],
@@ -817,10 +911,13 @@ target_rule = (
 weekly_labor_chart = (
     alt.layer(
         labor_dollar_bars,
-        labor_percent_line,
-        target_rule,
+        labor_rate_lines,
+        target_rules,
     )
-    .resolve_scale(y="independent")
+    .resolve_scale(
+        y="independent",
+        color="independent",
+    )
     .properties(height=440)
 )
 
@@ -831,10 +928,9 @@ st.altair_chart(
 
 st.caption(
     "Bars show labor dollars on the left axis, split into "
-    "hourly (blue) and salaried (purple) pay. The orange "
-    "line shows labor as a percent of net sales on the "
-    "right axis, and the dashed green line is the target "
-    "rate (hourly labor % plus GM labor %)."
+    "hourly and salaried pay. Lines on the right axis are "
+    "hourly, GM, and total labor as a percent of net sales. "
+    "Each dashed line is that series' target."
 )
 
 
@@ -919,28 +1015,48 @@ daily_labor_bars = (
     )
 )
 
-daily_percent_line = (
-    alt.Chart(visible_daily_df)
+daily_rates_df = melt_labor_rates(
+    visible_daily_df,
+    ["business_date"],
+)
+
+daily_percent_min, daily_percent_max = percent_axis_limits(
+    visible_daily_df,
+    [
+        hourly_target_percent,
+        gm_target_percent,
+        target_labor_percent,
+    ],
+)
+
+daily_percent_scale = alt.Scale(
+    domain=[daily_percent_min, daily_percent_max],
+    zero=False,
+)
+
+daily_rate_lines = (
+    alt.Chart(daily_rates_df)
     .mark_line(
-        color="#ff7f0e",
         strokeWidth=2.5,
-        point=alt.OverlayMarkDef(
-            color="#ff7f0e",
-            size=40,
-        ),
+        point=alt.OverlayMarkDef(size=40),
     )
     .encode(
         x=daily_axis,
         y=alt.Y(
-            "labor_percent:Q",
+            "rate_percent:Q",
             title="Labor % of Net Sales",
             axis=alt.Axis(
                 orient="right",
                 format=".1f",
                 labelExpr="datum.value + '%'",
-                titleColor="#ff7f0e",
             ),
-            scale=alt.Scale(zero=False),
+            scale=daily_percent_scale,
+        ),
+        color=alt.Color(
+            "rate_series:N",
+            title="Labor %",
+            scale=RATE_COLORS,
+            sort=["Hourly", "GM", "Total"],
         ),
         tooltip=[
             alt.Tooltip(
@@ -949,7 +1065,11 @@ daily_percent_line = (
                 format="%B %d, %Y",
             ),
             alt.Tooltip(
-                "labor_percent:Q",
+                "rate_series:N",
+                title="Rate",
+            ),
+            alt.Tooltip(
+                "rate_percent:Q",
                 title="Labor %",
                 format=".2f",
             ),
@@ -957,19 +1077,58 @@ daily_percent_line = (
     )
 )
 
+daily_target_rules = (
+    alt.Chart(target_df)
+    .mark_rule(
+        strokeWidth=2,
+        strokeDash=[8, 5],
+    )
+    .encode(
+        y=alt.Y(
+            "target:Q",
+            axis=None,
+            scale=daily_percent_scale,
+        ),
+        color=alt.Color(
+            "rate_series:N",
+            scale=RATE_COLORS,
+            legend=None,
+        ),
+        tooltip=[
+            alt.Tooltip(
+                "rate_series:N",
+                title="Target",
+            ),
+            alt.Tooltip(
+                "target:Q",
+                title="Target %",
+                format=".1f",
+            ),
+        ],
+    )
+)
+
 daily_chart = (
-    alt.layer(daily_labor_bars, daily_percent_line)
-    .resolve_scale(y="independent")
+    alt.layer(
+        daily_labor_bars,
+        daily_rate_lines,
+        daily_target_rules,
+    )
+    .resolve_scale(
+        y="independent",
+        color="independent",
+    )
     .properties(height=400)
 )
 
 st.altair_chart(daily_chart, use_container_width=True)
 
 st.caption(
-    "Bars show each day's hourly and salaried labor dollars; "
-    "hover a bar for that day's net sales. Low-volume days "
-    "carry the same fixed salaried cost as "
-    "busy days, so the labor rate usually spikes on the "
+    "Bars show each day's hourly and salaried labor dollars. "
+    "Lines are hourly, GM, and total labor as a percent of "
+    "net sales, and each dashed line is that series' "
+    "target. Low-volume days carry the same fixed GM salary "
+    "as busy days, so the labor rate usually spikes on the "
     "slowest days."
 )
 

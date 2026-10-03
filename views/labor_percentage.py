@@ -1027,6 +1027,58 @@ labor_rate_lines = (
     )
 )
 
+net_sales_peak = visible_weeks_df["net_sales"].max()
+
+if pd.isna(net_sales_peak) or net_sales_peak <= 0:
+    net_sales_axis_max = 1.0
+else:
+    net_sales_axis_max = float(net_sales_peak) * 1.08
+
+net_sales_scale = alt.Scale(domain=[0, net_sales_axis_max])
+
+net_sales_line = (
+    alt.Chart(visible_weeks_df)
+    .mark_line(
+        color="#17becf",
+        strokeWidth=2.5,
+        point=alt.OverlayMarkDef(
+            size=55,
+            color="#17becf",
+        ),
+    )
+    .encode(
+        x=alt.X(
+            "week_label:N",
+            title="Week Starting",
+            sort=week_label_order,
+        ),
+        y=alt.Y(
+            "net_sales:Q",
+            title="Net Sales",
+            axis=alt.Axis(
+                orient="right",
+                offset=90,
+                format="$,.0f",
+                titleColor="#17becf",
+                labelColor="#17becf",
+                grid=False,
+            ),
+            scale=net_sales_scale,
+        ),
+        tooltip=[
+            alt.Tooltip(
+                "week_label:N",
+                title="Week Starting",
+            ),
+            alt.Tooltip(
+                "net_sales:Q",
+                title="Net Sales",
+                format="$,.2f",
+            ),
+        ],
+    )
+)
+
 target_rules = (
     alt.Chart(target_df)
     .mark_rule(
@@ -1061,6 +1113,7 @@ target_rules = (
 weekly_labor_chart = (
     alt.layer(
         labor_dollar_bars,
+        net_sales_line,
         labor_rate_lines,
         target_rules,
     )
@@ -1078,9 +1131,10 @@ st.altair_chart(
 
 st.caption(
     "Bars show labor dollars on the left axis, split into "
-    "hourly, GM, and DM pay. Lines on the right axis are "
-    "hourly, GM, DM, and total labor as a percent of net "
-    "sales. Each dashed line is that series' target."
+    "hourly, GM, and DM pay. Lines on the inner right axis "
+    "are hourly, GM, DM, and total labor as a percent of "
+    "net sales. Each dashed line is that series' target. "
+    "The outer right axis, in teal, is net sales."
 )
 
 

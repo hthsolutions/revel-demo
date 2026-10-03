@@ -1420,9 +1420,8 @@ with ot_input_column:
         value=0.0,
         step=1.0,
         help=(
-            "Weeks at or below this many overtime hours "
-            "are green. Weeks above it are red. Also draws "
-            "a dashed line at this value on the right axis."
+            "Draws a dashed horizontal line at this many "
+            "overtime hours on the right axis."
         ),
     )
 
@@ -1432,12 +1431,85 @@ if ot_hours_target is None:
 
 ot_hours_target = float(ot_hours_target)
 
-ot_chart_df = visible_weeks_df.copy()
-ot_chart_df["within_ot_threshold"] = (
-    ot_chart_df["ot_hours"] <= ot_hours_target
+# Role segments use the same days as the weekly totals,
+# including the week-to-date trim, so the stack matches
+# the overtime dollars and hours already on this page.
+counted_ot_days = (
+    comparison_df.loc[
+        comparison_df["week_start"].isin(visible_week_starts),
+        ["business_date", "location_key"],
+    ]
+    .drop_duplicates()
 )
 
-ot_labor_peak = ot_chart_df["ot_labor"].max()
+ot_role_df = pd.DataFrame(
+    columns=["week_start", "role", "ot_labor", "ot_hours"]
+)
+
+if not shift_df.empty and not counted_ot_days.empty:
+    ot_role_source = shift_df.copy()
+
+    if selected_location != "All Locations":
+        ot_role_source = ot_role_source[
+            ot_role_source["location"] == selected_location
+        ]
+
+    ot_role_source = add_week_columns(
+        ot_role_source,
+        week_start_weekday,
+    )
+    ot_role_source = ot_role_source.merge(
+        counted_ot_days,
+        on=["business_date", "location_key"],
+        how="inner",
+    )
+
+    if not ot_role_source.empty:
+        ot_role_df = (
+            ot_role_source
+            .groupby(["week_start", "role"], as_index=False)
+            .agg(
+                ot_labor=("shift_ot_wages", "sum"),
+                ot_hours=("ot_hours", "sum"),
+            )
+        )
+        ot_role_df = ot_role_df[
+            (ot_role_df["ot_labor"] > 0)
+            | (ot_role_df["ot_hours"] > 0)
+        ].copy()
+
+if not ot_role_df.empty:
+    ot_role_df["week_start"] = pd.to_datetime(
+        ot_role_df["week_start"]
+    ).dt.normalize()
+    ot_week_labels = visible_weeks_df[
+        ["week_start", "week_label", "is_complete_week"]
+    ].copy()
+    ot_week_labels["week_start"] = pd.to_datetime(
+        ot_week_labels["week_start"]
+    ).dt.normalize()
+    ot_role_df = ot_role_df.merge(
+        ot_week_labels,
+        on="week_start",
+        how="inner",
+    )
+
+stacked_ot_peak = (
+    ot_role_df.groupby("week_label")["ot_labor"].sum().max()
+    if not ot_role_df.empty
+    else 0.0
+)
+weekly_ot_peak = visible_weeks_df["ot_labor"].max()
+ot_labor_candidates = [
+    stacked_ot_peak,
+    weekly_ot_peak,
+]
+ot_labor_candidates = [
+    float(value)
+    for value in ot_labor_candidates
+    if pd.notna(value)
+]
+ot_labor_peak = max(ot_labor_candidates, default=0.0)
 
 if pd.isna(ot_labor_peak) or ot_labor_peak <= 0:
     ot_labor_axis_max = 1.0
@@ -1445,8 +1517,8 @@ else:
     ot_labor_axis_max = float(ot_labor_peak) * 1.08
 
 ot_hours_candidates = [
-    ot_chart_df["ot_hours"].min(),
-    ot_chart_df["ot_hours"].max(),
+    visible_weeks_df["ot_hours"].min(),
+    visible_weeks_df["ot_hours"].max(),
     0.0,
     ot_hours_target,
 ]
@@ -1477,57 +1549,60 @@ ot_hours_scale = alt.Scale(
     zero=False,
 )
 
-ot_labor_bars = (
-    alt.Chart(ot_chart_df)
-    .mark_bar()
-    .encode(
-        x=alt.X(
-            "week_label:N",
-            title="Week Starting",
-            sort=week_label_order,
-        ),
-        y=alt.Y(
-            "ot_labor:Q",
-            title="Total OT Labor $",
-            axis=alt.Axis(format="$,.0f"),
-            scale=ot_labor_scale,
-        ),
-        color=alt.condition(
-            alt.datum.within_ot_threshold,
-            alt.value("#2ca02c"),
-            alt.value("#d62728"),
-        ),
-        opacity=alt.condition(
-            alt.datum.is_complete_week,
-            alt.value(0.85),
-            alt.value(0.4),
-        ),
-        tooltip=[
-            alt.Tooltip(
+ot_chart_layers = []
+
+if not ot_role_df.empty:
+    ot_labor_bars = (
+        alt.Chart(ot_role_df)
+        .mark_bar()
+        .encode(
+            x=alt.X(
                 "week_label:N",
                 title="Week Starting",
+                sort=week_label_order,
             ),
-            alt.Tooltip(
+            y=alt.Y(
                 "ot_labor:Q",
                 title="Total OT Labor $",
-                format="$,.2f",
+                stack="zero",
+                axis=alt.Axis(format="$,.0f"),
+                scale=ot_labor_scale,
             ),
-            alt.Tooltip(
-                "ot_hours:Q",
-                title="Total OT Hours",
-                format=",.1f",
+            color=alt.Color(
+                "role:N",
+                title="Role",
+                scale=alt.Scale(scheme="tableau10"),
+                sort="ascending",
             ),
-            alt.Tooltip(
-                "days_counted:Q",
-                title="Days Counted",
-                format=".0f",
+            order=alt.Order("role:N", sort="ascending"),
+            opacity=alt.condition(
+                alt.datum.is_complete_week,
+                alt.value(0.85),
+                alt.value(0.4),
             ),
-        ],
+            tooltip=[
+                alt.Tooltip(
+                    "week_label:N",
+                    title="Week Starting",
+                ),
+                alt.Tooltip("role:N", title="Role"),
+                alt.Tooltip(
+                    "ot_hours:Q",
+                    title="OT Hours",
+                    format=",.1f",
+                ),
+                alt.Tooltip(
+                    "ot_labor:Q",
+                    title="OT Labor $",
+                    format="$,.2f",
+                ),
+            ],
+        )
     )
-)
+    ot_chart_layers.append(ot_labor_bars)
 
 ot_hours_line = (
-    alt.Chart(ot_chart_df)
+    alt.Chart(visible_weeks_df)
     .mark_line(
         color="#1f77b4",
         strokeWidth=2.5,
@@ -1597,11 +1672,9 @@ ot_hours_target_rule = (
     )
 )
 
-ot_chart_layers = [
-    ot_labor_bars,
-    ot_hours_line,
-    ot_hours_target_rule,
-]
+ot_chart_layers.extend(
+    [ot_hours_line, ot_hours_target_rule]
+)
 
 ot_labor_chart = (
     alt.layer(*ot_chart_layers)
@@ -1612,11 +1685,11 @@ ot_labor_chart = (
 st.altair_chart(ot_labor_chart, use_container_width=True)
 
 st.caption(
-    "Bars are total overtime pay on the left axis. "
-    "A bar is green when that week's overtime hours are "
-    "at or below OT Labor Hours, and red when they are "
-    "above. The line is total overtime hours on the right "
-    "axis, and the dashed line marks OT Labor Hours."
+    "Bars are overtime pay on the left axis, split by "
+    "role. Hover a segment for that role's overtime hours "
+    "and overtime pay. The line is total overtime hours "
+    "on the right axis, and the dashed line marks "
+    "OT Labor Hours."
 )
 
 

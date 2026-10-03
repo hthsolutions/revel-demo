@@ -23,6 +23,9 @@ from revel_data import (
 WEEKLY_SUM_COLUMNS = [
     "net_sales",
     "hourly_labor",
+    "gm_labor",
+    "dm_labor",
+    "other_salary_labor",
     "salary_labor",
     "total_labor",
     "labor_hours",
@@ -30,46 +33,60 @@ WEEKLY_SUM_COLUMNS = [
     "ot_labor",
 ]
 
-
-LABOR_TYPE_LABELS = {
-    "hourly_labor": "Hourly",
-    "salary_labor": "Salaried",
+# daily_salary role names, matched after trimming and
+# upper-casing. Anything else still counts as salary.
+SALARY_ROLE_COLUMNS = {
+    "GM": "gm_wages",
+    "DM": "dm_wages",
 }
 
-LABOR_TYPE_COLORS = alt.Scale(
-    domain=list(LABOR_TYPE_LABELS.values()),
-    range=["#1f77b4", "#9467bd"],
-)
+BAR_TYPE_LABELS = {
+    "hourly_labor": "Hourly",
+    "gm_labor": "GM",
+    "dm_labor": "DM",
+}
 
-# Rate lines sit on the right axis. Total stays distinct
-# from the two bar colors so all three can be read at once.
 RATE_SERIES = {
     "hourly_percent": "Hourly",
     "gm_percent": "GM",
+    "dm_percent": "DM",
     "labor_percent": "Total",
 }
 
-RATE_COLORS = alt.Scale(
-    domain=["Hourly", "GM", "Total"],
-    range=["#1f77b4", "#9467bd", "#ff7f0e"],
-)
+SEGMENT_COLORS = {
+    "Hourly": "#1f77b4",
+    "GM": "#9467bd",
+    "DM": "#2ca02c",
+    "Total": "#ff7f0e",
+    "Other salary": "#7f7f7f",
+}
+
+
+def color_scale(labels: list[str]) -> alt.Scale:
+    """Colors shared by the bars and the matching rate lines."""
+
+    return alt.Scale(
+        domain=labels,
+        range=[SEGMENT_COLORS[label] for label in labels],
+    )
 
 
 def stack_labor_types(
     frame: pd.DataFrame,
     id_columns: list[str],
+    type_labels: dict[str, str],
 ) -> pd.DataFrame:
     """Reshape to one row per labor type for stacked bars."""
 
     long_df = frame.melt(
         id_vars=id_columns,
-        value_vars=list(LABOR_TYPE_LABELS.keys()),
+        value_vars=list(type_labels.keys()),
         var_name="labor_type",
         value_name="labor_dollars",
     )
 
     long_df["labor_type"] = long_df["labor_type"].map(
-        LABOR_TYPE_LABELS
+        type_labels
     )
 
     return long_df
@@ -78,18 +95,19 @@ def stack_labor_types(
 def melt_labor_rates(
     frame: pd.DataFrame,
     id_columns: list[str],
+    rate_series: dict[str, str],
 ) -> pd.DataFrame:
-    """One row per hourly, GM, and total labor rate."""
+    """One row per hourly, GM, DM, and total labor rate."""
 
     long_df = frame.melt(
         id_vars=id_columns,
-        value_vars=list(RATE_SERIES.keys()),
+        value_vars=list(rate_series.keys()),
         var_name="rate_series",
         value_name="rate_percent",
     )
 
     long_df["rate_series"] = long_df["rate_series"].map(
-        RATE_SERIES
+        rate_series
     )
 
     return long_df
@@ -97,12 +115,13 @@ def melt_labor_rates(
 
 def percent_axis_limits(
     frame: pd.DataFrame,
+    rate_columns: list[str],
     extra_values: list[float],
 ) -> tuple[float, float]:
     """Y domain that fits every rate and every target."""
 
     values = (
-        frame[list(RATE_SERIES.keys())]
+        frame[rate_columns]
         .to_numpy(dtype=float)
         .ravel()
     )
@@ -140,8 +159,8 @@ def safe_ratio(
 
 st.title("Labor % of Net Sales")
 st.caption(
-    "Hourly shift wages plus prorated salaried pay, measured "
-    "against net sales."
+    "Hourly shift wages plus prorated GM and DM salary, "
+    "measured against net sales."
 )
 
 try:
@@ -230,16 +249,67 @@ else:
         )
     )
 
+salary_wage_columns = [
+    "gm_wages",
+    "dm_wages",
+    "other_salary_wages",
+    "salary_wages",
+]
+
 if salary_df.empty:
-    daily_salary_df = empty_daily_frame(["salary_wages"])
+    daily_salary_df = empty_daily_frame(salary_wage_columns)
 else:
+    salary_by_role = salary_df.copy()
+    salary_by_role["role_key"] = (
+        salary_by_role["role"].str.strip().str.upper()
+    )
+
     daily_salary_df = (
-        salary_df
-        .groupby(
-            ["business_date", "location_key"],
-            as_index=False,
+        salary_by_role
+        .pivot_table(
+            index=["business_date", "location_key"],
+            columns="role_key",
+            values="daily_salary",
+            aggfunc="sum",
+            fill_value=0.0,
         )
-        .agg(salary_wages=("daily_salary", "sum"))
+        .reset_index()
+    )
+    daily_salary_df.columns.name = None
+
+    for role_key, column_name in SALARY_ROLE_COLUMNS.items():
+        if role_key in daily_salary_df.columns:
+            daily_salary_df = daily_salary_df.rename(
+                columns={role_key: column_name}
+            )
+        else:
+            daily_salary_df[column_name] = 0.0
+
+    named_wage_columns = set(SALARY_ROLE_COLUMNS.values())
+    extra_role_columns = [
+        column_name
+        for column_name in daily_salary_df.columns
+        if column_name not in {
+            "business_date",
+            "location_key",
+            *named_wage_columns,
+        }
+    ]
+
+    if extra_role_columns:
+        daily_salary_df["other_salary_wages"] = (
+            daily_salary_df[extra_role_columns].sum(axis=1)
+        )
+        daily_salary_df = daily_salary_df.drop(
+            columns=extra_role_columns
+        )
+    else:
+        daily_salary_df["other_salary_wages"] = 0.0
+
+    daily_salary_df["salary_wages"] = (
+        daily_salary_df["gm_wages"]
+        + daily_salary_df["dm_wages"]
+        + daily_salary_df["other_salary_wages"]
     )
 
 # Labor percent is only meaningful on days that report both
@@ -255,8 +325,8 @@ labor_df = daily_sales_df.merge(
     how="left",
 )
 
-labor_df["salary_wages"] = (
-    labor_df["salary_wages"].fillna(0.0)
+labor_df[salary_wage_columns] = (
+    labor_df[salary_wage_columns].fillna(0.0)
 )
 
 
@@ -319,12 +389,25 @@ gm_target_percent = st.sidebar.number_input(
     help="Target for GM salary as a percent of net sales.",
 )
 
-target_labor_percent = hourly_target_percent + gm_target_percent
+dm_target_percent = st.sidebar.number_input(
+    "DM labor %",
+    min_value=0.0,
+    max_value=100.0,
+    value=0.0,
+    step=0.5,
+    help="Target for DM salary as a percent of net sales.",
+)
+
+target_labor_percent = (
+    hourly_target_percent
+    + gm_target_percent
+    + dm_target_percent
+)
 
 st.sidebar.metric(
     "Target labor %",
     f"{target_labor_percent:.1f}%",
-    help="Hourly labor % plus GM labor %.",
+    help="Hourly labor % plus GM labor % plus DM labor %.",
 )
 
 if selected_location != "All Locations":
@@ -353,7 +436,14 @@ if labor_df.empty:
 # ---------------------------------------------------------
 
 labor_df["hourly_labor"] = labor_df["hourly_wages"]
-labor_df["salary_labor"] = labor_df["salary_wages"]
+labor_df["gm_labor"] = labor_df["gm_wages"]
+labor_df["dm_labor"] = labor_df["dm_wages"]
+labor_df["other_salary_labor"] = labor_df["other_salary_wages"]
+labor_df["salary_labor"] = (
+    labor_df["gm_labor"]
+    + labor_df["dm_labor"]
+    + labor_df["other_salary_labor"]
+)
 labor_df["ot_labor"] = labor_df["ot_wages"]
 labor_df["total_labor"] = (
     labor_df["hourly_labor"] + labor_df["salary_labor"]
@@ -380,11 +470,44 @@ labor_df["hourly_percent"] = (
 
 labor_df["gm_percent"] = (
     safe_ratio(
-        labor_df["salary_labor"],
+        labor_df["gm_labor"],
         labor_df["net_sales"],
     )
     * 100
 )
+
+labor_df["dm_percent"] = (
+    safe_ratio(
+        labor_df["dm_labor"],
+        labor_df["net_sales"],
+    )
+    * 100
+)
+
+labor_df["other_percent"] = (
+    safe_ratio(
+        labor_df["other_salary_labor"],
+        labor_df["net_sales"],
+    )
+    * 100
+)
+
+bar_type_labels = dict(BAR_TYPE_LABELS)
+rate_series = dict(RATE_SERIES)
+
+if float(labor_df["other_salary_labor"].sum()) > 0:
+    bar_type_labels["other_salary_labor"] = "Other salary"
+    rate_series["other_percent"] = "Other salary"
+
+bar_color_scale = color_scale(list(bar_type_labels.values()))
+rate_color_scale = color_scale(list(rate_series.values()))
+rate_order = list(rate_series.values())
+target_values = [
+    float(hourly_target_percent),
+    float(gm_target_percent),
+    float(dm_target_percent),
+    float(target_labor_percent),
+]
 
 labor_df["sales_per_labor_hour"] = safe_ratio(
     labor_df["net_sales"],
@@ -501,7 +624,23 @@ weekly_df["hourly_percent"] = (
 
 weekly_df["gm_percent"] = (
     safe_ratio(
-        weekly_df["salary_labor"],
+        weekly_df["gm_labor"],
+        weekly_df["net_sales"],
+    )
+    * 100
+)
+
+weekly_df["dm_percent"] = (
+    safe_ratio(
+        weekly_df["dm_labor"],
+        weekly_df["net_sales"],
+    )
+    * 100
+)
+
+weekly_df["other_percent"] = (
+    safe_ratio(
+        weekly_df["other_salary_labor"],
         weekly_df["net_sales"],
     )
     * 100
@@ -645,8 +784,13 @@ hourly_label = format_metric_value(
     "currency",
 )
 
-salary_label = format_metric_value(
-    current_week["salary_labor"],
+gm_label = format_metric_value(
+    current_week["gm_labor"],
+    "currency",
+)
+
+dm_label = format_metric_value(
+    current_week["dm_labor"],
     "currency",
 )
 
@@ -660,7 +804,15 @@ current_hourly_percent = format_metric_value(
 
 current_gm_percent = format_metric_value(
     percent_of_sales(
-        current_week["salary_labor"],
+        current_week["gm_labor"],
+        current_week["net_sales"],
+    ),
+    "percent",
+)
+
+current_dm_percent = format_metric_value(
+    percent_of_sales(
+        current_week["dm_labor"],
         current_week["net_sales"],
     ),
     "percent",
@@ -671,10 +823,12 @@ st.caption(
         f"Previous week was {previous_label}. Target is "
         f"{target_labor_percent:.1f}% "
         f"({hourly_target_percent:.1f}% hourly + "
-        f"{gm_target_percent:.1f}% GM). Hourly pay was "
+        f"{gm_target_percent:.1f}% GM + "
+        f"{dm_target_percent:.1f}% DM). Hourly pay was "
         f"{hourly_label} ({current_hourly_percent} of net "
-        f"sales) and GM salary was {salary_label} "
-        f"({current_gm_percent})."
+        f"sales), GM salary was {gm_label} "
+        f"({current_gm_percent}), and DM salary was "
+        f"{dm_label} ({current_dm_percent})."
     )
 )
 
@@ -736,21 +890,14 @@ else:
 
 percent_axis_min, percent_axis_max = percent_axis_limits(
     visible_weeks_df,
-    [
-        hourly_target_percent,
-        gm_target_percent,
-        target_labor_percent,
-    ],
+    list(rate_series.keys()),
+    target_values,
 )
 
 target_df = pd.DataFrame(
     {
-        "rate_series": ["Hourly", "GM", "Total"],
-        "target": [
-            float(hourly_target_percent),
-            float(gm_target_percent),
-            float(target_labor_percent),
-        ],
+        "rate_series": ["Hourly", "GM", "DM", "Total"],
+        "target": target_values,
     }
 )
 
@@ -763,6 +910,7 @@ weekly_stacked_df = stack_labor_types(
         "net_sales",
         "days_counted",
     ],
+    bar_type_labels,
 )
 
 labor_dollar_bars = (
@@ -784,7 +932,8 @@ labor_dollar_bars = (
         color=alt.Color(
             "labor_type:N",
             title="Labor Type",
-            scale=LABOR_TYPE_COLORS,
+            scale=bar_color_scale,
+            sort=list(bar_type_labels.values()),
         ),
         opacity=alt.condition(
             alt.datum.is_complete_week,
@@ -824,6 +973,7 @@ labor_dollar_bars = (
 weekly_rates_df = melt_labor_rates(
     visible_weeks_df,
     ["week_label"],
+    rate_series,
 )
 
 percent_scale = alt.Scale(
@@ -856,8 +1006,8 @@ labor_rate_lines = (
         color=alt.Color(
             "rate_series:N",
             title="Labor %",
-            scale=RATE_COLORS,
-            sort=["Hourly", "GM", "Total"],
+            scale=rate_color_scale,
+            sort=rate_order,
         ),
         tooltip=[
             alt.Tooltip(
@@ -891,7 +1041,7 @@ target_rules = (
         ),
         color=alt.Color(
             "rate_series:N",
-            scale=RATE_COLORS,
+            scale=rate_color_scale,
             legend=None,
         ),
         tooltip=[
@@ -928,9 +1078,9 @@ st.altair_chart(
 
 st.caption(
     "Bars show labor dollars on the left axis, split into "
-    "hourly and salaried pay. Lines on the right axis are "
-    "hourly, GM, and total labor as a percent of net sales. "
-    "Each dashed line is that series' target."
+    "hourly, GM, and DM pay. Lines on the right axis are "
+    "hourly, GM, DM, and total labor as a percent of net "
+    "sales. Each dashed line is that series' target."
 )
 
 
@@ -966,6 +1116,7 @@ daily_stacked_df = stack_labor_types(
         "total_labor",
         "labor_percent",
     ],
+    bar_type_labels,
 )
 
 daily_labor_bars = (
@@ -982,7 +1133,8 @@ daily_labor_bars = (
         color=alt.Color(
             "labor_type:N",
             title="Labor Type",
-            scale=LABOR_TYPE_COLORS,
+            scale=bar_color_scale,
+            sort=list(bar_type_labels.values()),
         ),
         tooltip=[
             alt.Tooltip(
@@ -1018,15 +1170,13 @@ daily_labor_bars = (
 daily_rates_df = melt_labor_rates(
     visible_daily_df,
     ["business_date"],
+    rate_series,
 )
 
 daily_percent_min, daily_percent_max = percent_axis_limits(
     visible_daily_df,
-    [
-        hourly_target_percent,
-        gm_target_percent,
-        target_labor_percent,
-    ],
+    list(rate_series.keys()),
+    target_values,
 )
 
 daily_percent_scale = alt.Scale(
@@ -1055,8 +1205,8 @@ daily_rate_lines = (
         color=alt.Color(
             "rate_series:N",
             title="Labor %",
-            scale=RATE_COLORS,
-            sort=["Hourly", "GM", "Total"],
+            scale=rate_color_scale,
+            sort=rate_order,
         ),
         tooltip=[
             alt.Tooltip(
@@ -1091,7 +1241,7 @@ daily_target_rules = (
         ),
         color=alt.Color(
             "rate_series:N",
-            scale=RATE_COLORS,
+            scale=rate_color_scale,
             legend=None,
         ),
         tooltip=[
@@ -1124,10 +1274,10 @@ daily_chart = (
 st.altair_chart(daily_chart, use_container_width=True)
 
 st.caption(
-    "Bars show each day's hourly and salaried labor dollars. "
-    "Lines are hourly, GM, and total labor as a percent of "
-    "net sales, and each dashed line is that series' "
-    "target. Low-volume days carry the same fixed GM salary "
+    "Bars show each day's hourly, GM, and DM labor dollars. "
+    "Lines are hourly, GM, DM, and total labor as a percent "
+    "of net sales, and each dashed line is that series' "
+    "target. Low-volume days carry the same fixed salary "
     "as busy days, so the labor rate usually spikes on the "
     "slowest days."
 )
@@ -1267,7 +1417,8 @@ with st.expander("View weekly labor breakdown"):
             "days_counted",
             "net_sales",
             "hourly_labor",
-            "salary_labor",
+            "gm_labor",
+            "dm_labor",
             "total_labor",
             "labor_percent",
             "previous_labor_percent",
@@ -1306,8 +1457,12 @@ with st.expander("View weekly labor breakdown"):
                 "Hourly",
                 format="$%.2f",
             ),
-            "salary_labor": st.column_config.NumberColumn(
-                "Salaried",
+            "gm_labor": st.column_config.NumberColumn(
+                "GM",
+                format="$%.2f",
+            ),
+            "dm_labor": st.column_config.NumberColumn(
+                "DM",
                 format="$%.2f",
             ),
             "total_labor": st.column_config.NumberColumn(
@@ -1350,7 +1505,8 @@ with st.expander("View daily labor records"):
             "location",
             "net_sales",
             "hourly_labor",
-            "salary_labor",
+            "gm_labor",
+            "dm_labor",
             "total_labor",
             "labor_percent",
             "labor_hours",
@@ -1386,8 +1542,12 @@ with st.expander("View daily labor records"):
                 "Hourly",
                 format="$%.2f",
             ),
-            "salary_labor": st.column_config.NumberColumn(
-                "Salaried",
+            "gm_labor": st.column_config.NumberColumn(
+                "GM",
+                format="$%.2f",
+            ),
+            "dm_labor": st.column_config.NumberColumn(
+                "DM",
                 format="$%.2f",
             ),
             "total_labor": st.column_config.NumberColumn(

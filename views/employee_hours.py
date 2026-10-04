@@ -375,7 +375,7 @@ week_totals = week_totals.sort_values(
     ascending=[False, True],
 )
 week_totals["employee_label"] = week_totals.apply(
-    lambda row: f"{row.employee} ({row.shift_hours:.1f})",
+    lambda row: f"{row.employee} ({row.shift_hours:.2f})",
     axis=1,
 )
 label_by_employee = dict(

@@ -20,6 +20,11 @@ navigation = st.navigation(
             title="Labor % of Net Sales",
             icon="🧾",
         ),
+        st.Page(
+            "views/employee_hours.py",
+            title="Hourly Employee Hours",
+            icon="🕒",
+        ),
     ]
 )
 

@@ -66,9 +66,10 @@ def employee_week_order(week_df: pd.DataFrame) -> pd.DataFrame:
         ascending=[True, False, True],
     )
     week_totals["employee_label"] = [
-        f"{employee} ({hours:.1f} hrs)"
-        for employee, hours in zip(
+        f"{employee} — {role} ({hours:.1f} hrs)"
+        for employee, role, hours in zip(
             week_totals["employee"],
+            week_totals["sort_role"],
             week_totals["shift_hours"],
         )
     ]
@@ -424,6 +425,9 @@ label_by_employee = dict(
 segments_df["employee_label"] = segments_df["employee"].map(
     label_by_employee
 )
+segments_df["sort_role"] = segments_df["employee"].map(
+    dict(zip(week_totals["employee"], week_totals["sort_role"]))
+)
 employee_order = week_totals["employee_label"].tolist()
 day_label_order = days_df["day_label"].tolist()
 missing_days = [
@@ -436,6 +440,7 @@ if missing_days:
         {
             "employee": week_totals["employee"].iloc[0],
             "employee_label": employee_order[0],
+            "sort_role": week_totals["sort_role"].iloc[0],
             "day_label": missing_days,
             "start_hour": 0.0,
             "end_hour": 0.0,
@@ -460,7 +465,7 @@ shifts = (
             "employee_label:N",
             title=None,
             sort=employee_order,
-            axis=alt.Axis(labelLimit=280),
+            axis=alt.Axis(labelLimit=420),
         ),
         x=alt.X(
             "start_hour:Q",
@@ -496,6 +501,7 @@ shifts = (
         ),
         tooltip=[
             alt.Tooltip("employee:N", title="Employee"),
+            alt.Tooltip("sort_role:N", title="Role"),
             alt.Tooltip("day_label:N", title="Day"),
             alt.Tooltip("clock_in_label:N", title="Clock In"),
             alt.Tooltip("clock_out_label:N", title="Clock Out"),
@@ -528,11 +534,12 @@ hours_chart = shifts.properties(width=128, height=row_height)
 st.altair_chart(hours_chart, use_container_width=True)
 st.caption(
     f"{len(employee_order):,} hourly employee(s). "
-    "Names are grouped by role, then from the most hours "
-    "at the top of each role to the fewest. Someone who "
-    "worked more than one role sits with the role where "
-    "they worked the most hours. The number beside each "
-    "name is that employee's total hours for the week. "
+    "Each name shows the role they are grouped under "
+    "and their total hours for the week. Names are grouped "
+    "by that role, then from the most hours at the top of "
+    "each role to the fewest. Someone who worked more than "
+    "one role sits with the role where they worked the "
+    "most hours. "
     "Each bar sits on the hours they were clocked in "
     "and turns red for overtime at the end of the shift."
 )

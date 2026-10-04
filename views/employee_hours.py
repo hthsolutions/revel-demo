@@ -332,15 +332,15 @@ kpi_columns[0].metric(
     f"{total_hours:,.1f} hrs",
 )
 kpi_columns[1].metric(
-    "Regular",
+    "Non-OT Total Hours",
     f"{regular_hours_total:,.1f} hrs",
 )
 kpi_columns[2].metric(
-    "OT",
+    "OT Total Hours",
     f"{ot_hours_total:,.1f} hrs",
 )
 kpi_columns[3].metric(
-    "OT %",
+    "OT Hours % of Total Hours",
     f"{ot_percent:,.1f}%",
 )
 kpi_columns[4].metric(

@@ -24,6 +24,57 @@ SEGMENT_ORDER = ["Regular", "Overtime"]
 SEGMENT_COLORS = ["#2ca02c", "#d62728"]
 
 
+def employee_week_order(week_df: pd.DataFrame) -> pd.DataFrame:
+    """One row per employee, grouped by role, then most hours first.
+
+    Someone who worked more than one role is placed with the
+    role that accounts for the most of their hours.
+    """
+
+    role_hours = (
+        week_df
+        .groupby(["employee", "role"], as_index=False)["shift_hours"]
+        .sum()
+    )
+    role_hours = role_hours.sort_values(
+        ["employee", "shift_hours", "role"],
+        ascending=[True, False, True],
+    )
+    primary_role = (
+        role_hours
+        .drop_duplicates("employee")
+        [["employee", "role"]]
+        .rename(columns={"role": "sort_role"})
+    )
+    week_totals = (
+        week_df
+        .groupby("employee", as_index=False)["shift_hours"]
+        .sum()
+    )
+    week_totals = week_totals.merge(
+        primary_role,
+        on="employee",
+        how="left",
+    )
+    week_totals["sort_role"] = (
+        week_totals["sort_role"].fillna("Unassigned")
+    )
+    week_totals["role_key"] = week_totals["sort_role"].str.lower()
+    week_totals["name_key"] = week_totals["employee"].str.lower()
+    week_totals = week_totals.sort_values(
+        ["role_key", "shift_hours", "name_key"],
+        ascending=[True, False, True],
+    )
+    week_totals["employee_label"] = [
+        f"{employee} ({hours:.1f} hrs)"
+        for employee, hours in zip(
+            week_totals["employee"],
+            week_totals["shift_hours"],
+        )
+    ]
+    return week_totals.reset_index(drop=True)
+
+
 def format_week(week_start) -> str:
     """Label a week by its first and last calendar day."""
 
@@ -358,25 +409,11 @@ if not segment_rows:
 segments_df = pd.DataFrame(segment_rows)
 segments_df["bar_opacity"] = 1.0
 
-# Most hours at the top, fewest at the bottom. The
-# number beside each name is that week's paid hours.
-week_totals = (
-    week_df
-    .groupby("employee", as_index=False)["shift_hours"]
-    .sum()
-)
+# Grouped by role, then most hours at the top of each
+# role. The number beside each name is that week's paid hours.
 shown_employees = set(segments_df["employee"])
-week_totals = week_totals[
-    week_totals["employee"].isin(shown_employees)
-].copy()
-week_totals["name_key"] = week_totals["employee"].str.lower()
-week_totals = week_totals.sort_values(
-    ["shift_hours", "name_key"],
-    ascending=[False, True],
-)
-week_totals["employee_label"] = week_totals.apply(
-    lambda row: f"{row.employee} ({row.shift_hours:.1f})",
-    axis=1,
+week_totals = employee_week_order(
+    week_df[week_df["employee"].isin(shown_employees)]
 )
 label_by_employee = dict(
     zip(
@@ -491,9 +528,11 @@ hours_chart = shifts.properties(width=128, height=row_height)
 st.altair_chart(hours_chart, use_container_width=True)
 st.caption(
     f"{len(employee_order):,} hourly employee(s). "
-    "Names run from the most hours at the top to the "
-    "fewest at the bottom. The number beside each name "
-    "is that employee's total hours for the week. "
+    "Names are grouped by role, then from the most hours "
+    "at the top of each role to the fewest. Someone who "
+    "worked more than one role sits with the role where "
+    "they worked the most hours. The number beside each "
+    "name is that employee's total hours for the week. "
     "Each bar sits on the hours they were clocked in "
     "and turns red for overtime at the end of the shift."
 )

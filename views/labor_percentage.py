@@ -1699,6 +1699,82 @@ ot_hours_line = (
     )
 )
 
+ot_percent_df = visible_weeks_df[
+    ["week_label", "ot_labor", "total_labor"]
+].copy()
+ot_percent_df["ot_labor_percent"] = (
+    safe_ratio(
+        ot_percent_df["ot_labor"],
+        ot_percent_df["total_labor"],
+    )
+    * 100
+)
+
+ot_percent_peak = ot_percent_df["ot_labor_percent"].max()
+
+if pd.isna(ot_percent_peak) or ot_percent_peak <= 0:
+    ot_percent_axis_max = 1.0
+else:
+    ot_percent_axis_max = float(ot_percent_peak) * 1.08
+
+ot_percent_scale = alt.Scale(
+    domain=[0, ot_percent_axis_max],
+)
+
+ot_percent_line = (
+    alt.Chart(ot_percent_df)
+    .mark_line(
+        color="#6a3d9a",
+        strokeWidth=2.5,
+        point=alt.OverlayMarkDef(
+            size=55,
+            color="#6a3d9a",
+        ),
+    )
+    .encode(
+        x=alt.X(
+            "week_label:N",
+            title="Week Starting",
+            sort=week_label_order,
+        ),
+        y=alt.Y(
+            "ot_labor_percent:Q",
+            title="OT % of Total Labor",
+            axis=alt.Axis(
+                orient="right",
+                offset=90,
+                format=".1f",
+                labelExpr="datum.value + '%'",
+                titleColor="#6a3d9a",
+                labelColor="#6a3d9a",
+                grid=False,
+            ),
+            scale=ot_percent_scale,
+        ),
+        tooltip=[
+            alt.Tooltip(
+                "week_label:N",
+                title="Week Starting",
+            ),
+            alt.Tooltip(
+                "ot_labor_percent:Q",
+                title="OT % of Total Labor",
+                format=".1f",
+            ),
+            alt.Tooltip(
+                "ot_labor:Q",
+                title="OT Labor $",
+                format="$,.2f",
+            ),
+            alt.Tooltip(
+                "total_labor:Q",
+                title="Total Labor $",
+                format="$,.2f",
+            ),
+        ],
+    )
+)
+
 ot_hours_target_df = pd.DataFrame(
     {"ot_hours_target": [ot_hours_target]}
 )
@@ -1727,7 +1803,11 @@ ot_hours_target_rule = (
 )
 
 ot_chart_layers.extend(
-    [ot_hours_line, ot_hours_target_rule]
+    [
+        ot_percent_line,
+        ot_hours_line,
+        ot_hours_target_rule,
+    ]
 )
 
 ot_labor_chart = (
@@ -1741,9 +1821,10 @@ st.altair_chart(ot_labor_chart, use_container_width=True)
 st.caption(
     "Bars are overtime pay on the left axis, split by "
     "role. Hover a segment for that role's overtime hours "
-    "and overtime pay. The line is total overtime hours "
-    "on the right axis, and the dashed line marks "
-    "OT Labor Hours."
+    "and overtime pay. The inner right axis is total "
+    "overtime hours, and the dashed line marks "
+    "OT Labor Hours. The outer right axis is overtime "
+    "pay as a percent of total labor."
 )
 
 

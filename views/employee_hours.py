@@ -465,22 +465,22 @@ shifts = (
             alt.Tooltip(
                 "regular_hours:Q",
                 title="Regular Hours",
-                format=".1f",
+                format=".2f",
             ),
             alt.Tooltip(
                 "ot_hours:Q",
                 title="Overtime Hours",
-                format=".1f",
+                format=".2f",
             ),
             alt.Tooltip(
                 "shift_hours:Q",
                 title="Shift Hours",
-                format=".1f",
+                format=".2f",
             ),
             alt.Tooltip(
                 "cumulative_hours:Q",
                 title="Cumulative Hours",
-                format=".1f",
+                format=".2f",
             ),
         ],
     )

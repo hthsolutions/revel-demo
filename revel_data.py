@@ -256,6 +256,80 @@ def load_shift_data() -> pd.DataFrame:
     return dataframe.sort_values("business_date")
 
 
+# Clock columns seen on Revel time-worked extracts. The
+# first pair that exists on the shift table is used.
+CLOCK_COLUMN_PAIRS = [
+    ("clock_in", "clock_out"),
+    ("start_time", "end_time"),
+    ("shift_start", "shift_end"),
+    ("time_in", "time_out"),
+    ("in_time", "out_time"),
+]
+
+
+@st.cache_data(ttl=300)
+def get_shift_columns() -> list[str]:
+    """Column names on the shift table, from a single row."""
+
+    supabase = get_supabase_client()
+    response = (
+        supabase
+        .table(SHIFT_TABLE)
+        .select("*")
+        .limit(1)
+        .execute()
+    )
+    rows = response.data or []
+    if not rows:
+        return []
+    return list(rows[0].keys())
+
+
+def resolve_clock_columns(
+    columns: list[str],
+) -> tuple[str, str] | None:
+    """Pick the clock-in and clock-out columns, if present."""
+
+    lookup = {name.lower(): name for name in columns}
+    for clock_in, clock_out in CLOCK_COLUMN_PAIRS:
+        if clock_in in lookup and clock_out in lookup:
+            return lookup[clock_in], lookup[clock_out]
+    return None
+
+
+@st.cache_data(ttl=300)
+def load_shift_clocks() -> pd.DataFrame:
+    """Clock-in and clock-out for every shift.
+
+    Columns are record_key, clock_in, and clock_out.
+    The frame is empty when the table has no clock columns.
+    """
+
+    empty = pd.DataFrame(
+        columns=["record_key", "clock_in", "clock_out"]
+    )
+    columns = get_shift_columns()
+    pair = resolve_clock_columns(columns)
+    if pair is None:
+        return empty
+
+    clock_in, clock_out = pair
+    clocks = fetch_table(
+        SHIFT_TABLE,
+        ["record_key", clock_in, clock_out],
+        "date",
+    )
+    if clocks.empty:
+        return empty
+
+    return clocks.rename(
+        columns={
+            clock_in: "clock_in",
+            clock_out: "clock_out",
+        }
+    )
+
+
 @st.cache_data(ttl=300)
 def load_salary_data() -> pd.DataFrame:
     """Retrieve daily salaried-labor records from Supabase.

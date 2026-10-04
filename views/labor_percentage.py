@@ -1645,7 +1645,7 @@ ot_percent_line = (
         ),
         y=alt.Y(
             "ot_labor_percent:Q",
-            title="OT % of Total Labor",
+            title="$ OT % of Total Labor Dollars",
             axis=alt.Axis(
                 orient="right",
                 format=".1f",
@@ -1663,7 +1663,7 @@ ot_percent_line = (
             ),
             alt.Tooltip(
                 "ot_labor_percent:Q",
-                title="OT % of Total Labor",
+                title="$ OT % of Total Labor Dollars",
                 format=".1f",
             ),
             alt.Tooltip(

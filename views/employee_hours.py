@@ -267,6 +267,23 @@ week_df["cumulative_hours"] = (
     .cumsum()
 )
 
+total_hours = float(week_df["shift_hours"].sum())
+regular_hours_total = float(
+    week_df["regular_hours"].fillna(0).sum()
+)
+ot_hours_total = float(week_df["ot_hours"].fillna(0).sum())
+ot_percent = (
+    ot_hours_total / total_hours * 100
+    if total_hours
+    else 0.0
+)
+employees_with_ot = int(
+    (
+        week_df.groupby("employee")["ot_hours"].sum().fillna(0)
+        > 0
+    ).sum()
+)
+
 days_df = day_labels(selected_week, week_start_weekday)
 day_by_date = {
     pd.Timestamp(row.business_date).normalize(): row.day_label
@@ -306,6 +323,30 @@ for shift in week_df.itertuples(index=False):
                     ),
                 }
             )
+
+st.subheader(format_week(selected_week))
+
+kpi_columns = st.columns(5)
+kpi_columns[0].metric(
+    "Total Hours",
+    f"{total_hours:,.1f} hrs",
+)
+kpi_columns[1].metric(
+    "Regular",
+    f"{regular_hours_total:,.1f} hrs",
+)
+kpi_columns[2].metric(
+    "OT",
+    f"{ot_hours_total:,.1f} hrs",
+)
+kpi_columns[3].metric(
+    "OT %",
+    f"{ot_percent:,.1f}%",
+)
+kpi_columns[4].metric(
+    "Employees with OT",
+    f"{employees_with_ot:,.0f}",
+)
 
 if not segment_rows:
     st.info(
@@ -447,7 +488,6 @@ shifts = (
 
 hours_chart = shifts.properties(width=128, height=row_height)
 
-st.subheader(format_week(selected_week))
 st.altair_chart(hours_chart, use_container_width=True)
 st.caption(
     f"{len(employee_order):,} hourly employee(s). "

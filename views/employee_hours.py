@@ -316,10 +316,37 @@ if not segment_rows:
 
 segments_df = pd.DataFrame(segment_rows)
 segments_df["bar_opacity"] = 1.0
-employee_order = sorted(
-    segments_df["employee"].unique().tolist(),
-    key=str.lower,
+
+# Most hours at the top, fewest at the bottom. The
+# number beside each name is that week's paid hours.
+week_totals = (
+    week_df
+    .groupby("employee", as_index=False)["shift_hours"]
+    .sum()
 )
+shown_employees = set(segments_df["employee"])
+week_totals = week_totals[
+    week_totals["employee"].isin(shown_employees)
+].copy()
+week_totals["name_key"] = week_totals["employee"].str.lower()
+week_totals = week_totals.sort_values(
+    ["shift_hours", "name_key"],
+    ascending=[False, True],
+)
+week_totals["employee_label"] = week_totals.apply(
+    lambda row: f"{row.employee} ({row.shift_hours:.1f})",
+    axis=1,
+)
+label_by_employee = dict(
+    zip(
+        week_totals["employee"],
+        week_totals["employee_label"],
+    )
+)
+segments_df["employee_label"] = segments_df["employee"].map(
+    label_by_employee
+)
+employee_order = week_totals["employee_label"].tolist()
 day_label_order = days_df["day_label"].tolist()
 missing_days = [
     label
@@ -329,7 +356,8 @@ missing_days = [
 if missing_days:
     placeholders = pd.DataFrame(
         {
-            "employee": employee_order[0],
+            "employee": week_totals["employee"].iloc[0],
+            "employee_label": employee_order[0],
             "day_label": missing_days,
             "start_hour": 0.0,
             "end_hour": 0.0,
@@ -351,10 +379,10 @@ shifts = (
     .mark_bar()
     .encode(
         y=alt.Y(
-            "employee:N",
+            "employee_label:N",
             title=None,
             sort=employee_order,
-            axis=alt.Axis(labelLimit=220),
+            axis=alt.Axis(labelLimit=280),
         ),
         x=alt.X(
             "start_hour:Q",
@@ -423,8 +451,9 @@ st.subheader(format_week(selected_week))
 st.altair_chart(hours_chart, use_container_width=True)
 st.caption(
     f"{len(employee_order):,} hourly employee(s). "
-    "Each bar sits on the hours the employee was clocked "
-    "in. It stays green until overtime, then turns red. "
-    "Cumulative hours are paid hours from the start of "
-    "the week through that shift."
+    "Names run from the most hours at the top to the "
+    "fewest at the bottom. The number beside each name "
+    "is that employee's total hours for the week. "
+    "Each bar sits on the hours they were clocked in "
+    "and turns red for overtime at the end of the shift."
 )

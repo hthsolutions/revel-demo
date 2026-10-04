@@ -20,7 +20,7 @@ from revel_data import (
 DAY_HOUR_SPAN = 24
 STORE_TIMEZONE = ZoneInfo("America/Chicago")
 
-SEGMENT_ORDER = ["Regular", "Overtime"]
+SEGMENT_ORDER = ["Non-OT", "Overtime"]
 SEGMENT_COLORS = ["#2ca02c", "#d62728"]
 
 

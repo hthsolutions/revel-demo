@@ -136,7 +136,7 @@ def paint_shift(clock_in, clock_out, regular_hours, ot_hours):
 
     painted = []
     if red_start > clock_in:
-        painted.append((clock_in, red_start, "Regular"))
+        painted.append((clock_in, red_start, "Non-OT"))
     if clock_out > red_start:
         painted.append((red_start, clock_out, "Overtime"))
     return painted

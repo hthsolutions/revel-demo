@@ -237,13 +237,12 @@ else:
             as_index=False,
         )
         .agg(
-            # shift_wages is the per-shift total. The other
-            # wage columns in this table are pre-aggregated
-            # per employee per day and would double count.
+            # shift_wages is the per-shift total. ot_wages
+            # is the overtime portion of that same shift.
             hourly_wages=("shift_wages", "sum"),
             regular_hours=("regular_hours", "sum"),
             ot_hours=("ot_hours", "sum"),
-            ot_wages=("shift_ot_wages", "sum"),
+            ot_wages=("ot_wages", "sum"),
             shift_count=("shift_wages", "size"),
             employee_count=("employee", "nunique"),
         )
@@ -1504,7 +1503,7 @@ if not shift_df.empty and not counted_ot_days.empty:
             ot_role_source
             .groupby(["week_start", "role"], as_index=False)
             .agg(
-                ot_labor=("shift_ot_wages", "sum"),
+                ot_labor=("ot_wages", "sum"),
                 ot_hours=("ot_hours", "sum"),
             )
         )

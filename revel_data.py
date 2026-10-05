@@ -35,12 +35,12 @@ SALES_NUMERIC_COLUMNS = [
 ]
 
 SHIFT_NUMERIC_COLUMNS = [
-    "duration",
+    "hours",
     "regular_hours",
     "ot_hours",
+    "regular_wages",
+    "ot_wages",
     "shift_wages",
-    "shift_regular_wages",
-    "shift_ot_wages",
 ]
 
 # pandas uses Monday=0 through Sunday=6 for weekday numbers.
@@ -207,10 +207,9 @@ def load_sales_data() -> pd.DataFrame:
 def load_shift_data() -> pd.DataFrame:
     """Retrieve hourly shift records from Supabase.
 
-    One row is one worked shift. shift_wages is the only
-    wage column safe to sum: wages_earned and
-    daily_role_wages are pre-aggregated per employee per day
-    and repeat across that employee's shifts.
+    One row is one worked shift. shift_wages is the
+    per-shift total. regular_wages and ot_wages split
+    that total and are safe to sum on their own.
     """
 
     dataframe = fetch_table(

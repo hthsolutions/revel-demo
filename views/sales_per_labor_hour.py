@@ -584,18 +584,8 @@ if selected_day_label == "All days" and len(day_order) > 1:
     )
     row_order = [*day_order, "Week"]
 
-label_midpoint = heatmap_df["sales_per_labor_hour"].median(
-    skipna=True
-)
-heatmap_df = heatmap_df.copy()
-heatmap_df["label_color"] = "#1a1a1a"
-if pd.notna(label_midpoint):
-    heatmap_df.loc[
-        heatmap_df["sales_per_labor_hour"] >= label_midpoint,
-        "label_color",
-    ] = "white"
-
 heatmap_base = alt.Chart(heatmap_df)
+hour_sort = alt.SortField(field="hour_index")
 heatmap_rects = (
     heatmap_base
     .mark_rect(stroke="white", strokeWidth=1)
@@ -603,7 +593,8 @@ heatmap_rects = (
         x=alt.X(
             "hour_label:N",
             title="Hour",
-            sort=alt.SortField(field="hour_index"),
+            sort=hour_sort,
+            axis=alt.Axis(labelAngle=0),
         ),
         y=alt.Y(
             "day_label:N",
@@ -625,12 +616,18 @@ heatmap_rects = (
 heatmap_labels = (
     heatmap_base
     .transform_filter("isValid(datum.sales_per_labor_hour)")
-    .mark_text(fontSize=11, fontWeight="bold")
+    .mark_text(
+        fontSize=13,
+        fontWeight="bold",
+        color="#111111",
+        stroke="white",
+        strokeWidth=4,
+    )
     .encode(
         x=alt.X(
             "hour_label:N",
             title="Hour",
-            sort=alt.SortField(field="hour_index"),
+            sort=hour_sort,
         ),
         y=alt.Y(
             "day_label:N",
@@ -641,18 +638,17 @@ heatmap_labels = (
             "sales_per_labor_hour:Q",
             format="$.0f",
         ),
-        color=alt.Color(
-            "label_color:N",
-            scale=None,
-            legend=None,
-        ),
     )
 )
 heatmap = (
     alt.layer(heatmap_rects, heatmap_labels)
-    .properties(height=max(220, 42 * len(row_order)))
+    .properties(
+        width=alt.Step(72),
+        height=alt.Step(46),
+    )
+    .configure_view(strokeWidth=0, clip=False)
 )
-st.altair_chart(heatmap, use_container_width=True)
+st.altair_chart(heatmap, use_container_width=False)
 if selected_day_label == "All days" and len(day_order) > 1:
     st.caption(
         "Each cell is sales during that hour divided by "

@@ -617,11 +617,11 @@ heatmap_labels = (
     heatmap_base
     .transform_filter("isValid(datum.sales_per_labor_hour)")
     .mark_text(
-        fontSize=13,
+        fontSize=12,
         fontWeight="bold",
-        color="#111111",
+        color="#1a1a1a",
         stroke="white",
-        strokeWidth=4,
+        strokeWidth=1,
     )
     .encode(
         x=alt.X(

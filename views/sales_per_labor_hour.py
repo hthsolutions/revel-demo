@@ -584,8 +584,20 @@ if selected_day_label == "All days" and len(day_order) > 1:
     )
     row_order = [*day_order, "Week"]
 
-heatmap = (
-    alt.Chart(heatmap_df)
+label_midpoint = heatmap_df["sales_per_labor_hour"].median(
+    skipna=True
+)
+heatmap_df = heatmap_df.copy()
+heatmap_df["label_color"] = "#1a1a1a"
+if pd.notna(label_midpoint):
+    heatmap_df.loc[
+        heatmap_df["sales_per_labor_hour"] >= label_midpoint,
+        "label_color",
+    ] = "white"
+
+heatmap_base = alt.Chart(heatmap_df)
+heatmap_rects = (
+    heatmap_base
     .mark_rect(stroke="white", strokeWidth=1)
     .encode(
         x=alt.X(
@@ -609,6 +621,35 @@ heatmap = (
             *rate_tooltip,
         ],
     )
+)
+heatmap_labels = (
+    heatmap_base
+    .transform_filter("isValid(datum.sales_per_labor_hour)")
+    .mark_text(fontSize=11, fontWeight="bold")
+    .encode(
+        x=alt.X(
+            "hour_label:N",
+            title="Hour",
+            sort=alt.SortField(field="hour_index"),
+        ),
+        y=alt.Y(
+            "day_label:N",
+            title=None,
+            sort=row_order,
+        ),
+        text=alt.Text(
+            "sales_per_labor_hour:Q",
+            format="$.0f",
+        ),
+        color=alt.Color(
+            "label_color:N",
+            scale=None,
+            legend=None,
+        ),
+    )
+)
+heatmap = (
+    alt.layer(heatmap_rects, heatmap_labels)
     .properties(height=max(220, 42 * len(row_order)))
 )
 st.altair_chart(heatmap, use_container_width=True)

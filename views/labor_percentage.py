@@ -805,7 +805,7 @@ summary_columns[2].metric(
 )
 
 summary_columns[3].metric(
-    "Sales per Labor Hour",
+    "SpLH",
     format_metric_value(
         current_week["sales_per_labor_hour"],
         "currency",

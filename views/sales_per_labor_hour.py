@@ -300,7 +300,7 @@ def labor_hours_by_hour(shift_df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-st.title("Sales per Labor Hour per Hour")
+st.title("SpLH per Hour")
 st.caption(
     "Sales in each clock hour divided by the labor hours "
     "clocked during that same hour. The business day runs "
@@ -507,7 +507,7 @@ kpi_columns[1].metric(
     f"{total_labor_hours:,.2f} hrs",
 )
 kpi_columns[2].metric(
-    "Sales per Labor Hour",
+    "SpLH",
     "—" if pd.isna(overall_rate) else f"${overall_rate:,.2f}",
 )
 
@@ -557,7 +557,7 @@ rate_tooltip = [
     alt.Tooltip("hour_label:N", title="Hour"),
     alt.Tooltip(
         "sales_per_labor_hour:Q",
-        title="Sales per Labor Hour",
+        title="SpLH",
         format="$,.2f",
     ),
     alt.Tooltip("sales:Q", title="Sales", format="$,.2f"),
@@ -583,7 +583,7 @@ day_lines = (
         x=hour_axis(),
         y=alt.Y(
             "sales_per_labor_hour:Q",
-            title="Sales per Labor Hour",
+            title="SpLH",
             axis=alt.Axis(format="$,.0f"),
         ),
         color=alt.Color(
@@ -611,7 +611,7 @@ if selected_day_label == "All days" and len(day_order) > 1:
             x=hour_axis(),
             y=alt.Y(
                 "sales_per_labor_hour:Q",
-                title="Sales per Labor Hour",
+                title="SpLH",
                 axis=alt.Axis(format="$,.0f"),
             ),
             tooltip=rate_tooltip,
@@ -799,7 +799,7 @@ st.dataframe(
             format="%.2f",
         ),
         "sales_per_labor_hour": st.column_config.NumberColumn(
-            "Sales per Labor Hour",
+            "SpLH",
             format="$%.2f",
         ),
         "transactions": st.column_config.NumberColumn(

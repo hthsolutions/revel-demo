@@ -777,12 +777,13 @@ share_long = pd.concat(
 )
 share_chart = (
     alt.Chart(share_long)
-    .mark_line(
-        strokeWidth=2.5,
-        point=alt.OverlayMarkDef(size=55, filled=True),
-    )
+    .mark_bar()
     .encode(
         x=hour_axis(),
+        xOffset=alt.XOffset(
+            "series:N",
+            sort=share_series_order,
+        ),
         y=alt.Y(
             "percent:Q",
             title="Percent of Total",

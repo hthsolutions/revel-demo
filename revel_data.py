@@ -16,6 +16,8 @@ from supabase import Client, create_client
 SALES_TABLE = "daily-sales-summary-all-revenue-operations"
 SHIFT_TABLE = "daily_employee_shift_timeworked_summary"
 SALARY_TABLE = "daily_salary"
+HOURLY_SALES_TABLE = "revel_hourly_sales"
+SHIFT_SUMMARY_TABLE = "revel_shift_summary"
 
 # PostgREST returns at most 1,000 rows per request.
 PAGE_SIZE = 1000
@@ -267,13 +269,13 @@ CLOCK_COLUMN_PAIRS = [
 
 
 @st.cache_data(ttl=300)
-def get_shift_columns() -> list[str]:
-    """Column names on the shift table, from a single row."""
+def get_table_columns(table_name: str) -> list[str]:
+    """Column names on a table, from a single row."""
 
     supabase = get_supabase_client()
     response = (
         supabase
-        .table(SHIFT_TABLE)
+        .table(table_name)
         .select("*")
         .limit(1)
         .execute()
@@ -282,6 +284,43 @@ def get_shift_columns() -> list[str]:
     if not rows:
         return []
     return list(rows[0].keys())
+
+
+@st.cache_data(ttl=300)
+def get_shift_columns() -> list[str]:
+    """Column names on the shift table, from a single row."""
+
+    return get_table_columns(SHIFT_TABLE)
+
+
+def _pick_column(
+    columns: list[str],
+    candidates: list[str],
+) -> str | None:
+    """Return the first candidate present, ignoring case and spaces."""
+
+    lookup = {
+        name.strip().lower().replace(" ", "_"): name
+        for name in columns
+    }
+    for candidate in candidates:
+        key = candidate.strip().lower().replace(" ", "_")
+        if key in lookup:
+            return lookup[key]
+    return None
+
+
+def _resolve_clock_pair(columns: list[str]) -> tuple[str, str] | None:
+    """Pick clock-in and clock-out columns, if the table has them."""
+
+    lookup = {
+        name.strip().lower().replace(" ", "_"): name
+        for name in columns
+    }
+    for clock_in, clock_out in CLOCK_COLUMN_PAIRS:
+        if clock_in in lookup and clock_out in lookup:
+            return lookup[clock_in], lookup[clock_out]
+    return None
 
 
 def resolve_clock_columns(
@@ -327,6 +366,282 @@ def load_shift_clocks() -> pd.DataFrame:
             clock_out: "clock_out",
         }
     )
+
+
+HOURLY_SALES_COLUMNS = [
+    "location",
+    "business_date",
+    "interval_label",
+    "time",
+    "transactions",
+    "items",
+    "sales",
+    "extracted_at",
+]
+
+HOURLY_SALES_NUMERIC_COLUMNS = [
+    "transactions",
+    "items",
+    "sales",
+]
+
+
+@st.cache_data(ttl=300)
+def load_hourly_sales() -> pd.DataFrame:
+    """Retrieve 15-minute sales intervals from Supabase.
+
+    One row is one location and one interval. The extract
+    labels a business day from 6:00 AM through 5:59 AM.
+    """
+
+    available = get_table_columns(HOURLY_SALES_TABLE)
+    selected = [
+        column_name
+        for column_name in (
+            _pick_column(available, [candidate])
+            for candidate in HOURLY_SALES_COLUMNS
+        )
+        if column_name is not None
+    ]
+    order_column = _pick_column(
+        available,
+        ["business_date", "extracted_at", "id"],
+    )
+
+    if not selected or order_column is None:
+        return pd.DataFrame(columns=HOURLY_SALES_COLUMNS)
+
+    dataframe = fetch_table(
+        HOURLY_SALES_TABLE,
+        selected,
+        order_column,
+    )
+
+    if dataframe.empty:
+        return dataframe
+
+    rename = {}
+    for candidate in HOURLY_SALES_COLUMNS:
+        actual = _pick_column(list(dataframe.columns), [candidate])
+        if actual is not None and actual != candidate:
+            rename[actual] = candidate
+    if rename:
+        dataframe = dataframe.rename(columns=rename)
+
+    missing = [
+        column_name
+        for column_name in ("business_date", "location", "sales")
+        if column_name not in dataframe.columns
+    ]
+    if missing:
+        found = ", ".join(available) or "none"
+        raise ValueError(
+            "revel_hourly_sales is missing "
+            + ", ".join(missing)
+            + f". Columns on the table: {found}."
+        )
+
+    dataframe["business_date"] = (
+        pd.to_datetime(
+            dataframe["business_date"],
+            errors="coerce",
+            utc=True,
+        )
+        .dt.tz_localize(None)
+        .dt.normalize()
+    )
+
+    if "time" not in dataframe.columns:
+        dataframe["time"] = dataframe.get("interval_label")
+
+    dataframe = _coerce_numeric(
+        dataframe,
+        HOURLY_SALES_NUMERIC_COLUMNS,
+    )
+    dataframe[HOURLY_SALES_NUMERIC_COLUMNS] = (
+        dataframe[HOURLY_SALES_NUMERIC_COLUMNS].fillna(0.0)
+    )
+    dataframe = _add_location_key(dataframe)
+    dataframe = dataframe.dropna(subset=["business_date"])
+
+    if (
+        "extracted_at" in dataframe.columns
+        and dataframe["time"].notna().any()
+    ):
+        dataframe["extracted_at"] = pd.to_datetime(
+            dataframe["extracted_at"],
+            errors="coerce",
+            utc=True,
+        )
+        dataframe = dataframe.sort_values("extracted_at")
+        dataframe = dataframe.drop_duplicates(
+            subset=["location_key", "business_date", "time"],
+            keep="last",
+        )
+
+    return dataframe.sort_values(
+        ["business_date", "location", "time"]
+    )
+
+
+@st.cache_data(ttl=300)
+def load_shift_summary() -> pd.DataFrame:
+    """Retrieve shift clocks used to place labor on an hour.
+
+    The frame always has location, role, employee, shift_date,
+    clock_in, clock_out, and hours. Clock columns are empty
+    when the source table does not store them.
+    """
+
+    empty = pd.DataFrame(
+        columns=[
+            "location",
+            "location_key",
+            "role",
+            "employee",
+            "shift_date",
+            "clock_in",
+            "clock_out",
+            "hours",
+        ]
+    )
+    available = get_table_columns(SHIFT_SUMMARY_TABLE)
+    if not available:
+        return empty
+
+    date_column = _pick_column(
+        available,
+        ["business_date", "date", "shift_date"],
+    )
+    location_column = _pick_column(
+        available,
+        ["location", "establishment", "store"],
+    )
+    role_column = _pick_column(
+        available,
+        ["role", "job_title", "position"],
+    )
+    employee_column = _pick_column(
+        available,
+        ["employee", "employee_name", "name"],
+    )
+    hours_column = _pick_column(
+        available,
+        ["hours", "total_hours", "labor_hours", "worked_hours"],
+    )
+    regular_hours_column = None
+    ot_hours_column = None
+    if hours_column is None:
+        regular_hours_column = _pick_column(
+            available,
+            ["regular_hours"],
+        )
+        ot_hours_column = _pick_column(
+            available,
+            ["ot_hours"],
+        )
+    clock_pair = _resolve_clock_pair(available)
+    order_column = date_column or _pick_column(
+        available,
+        ["id", "record_key"],
+    ) or available[0]
+
+    selected = []
+    for column_name in (
+        date_column,
+        location_column,
+        role_column,
+        employee_column,
+        hours_column,
+        regular_hours_column,
+        ot_hours_column,
+        *(clock_pair or ()),
+    ):
+        if column_name and column_name not in selected:
+            selected.append(column_name)
+
+    dataframe = fetch_table(
+        SHIFT_SUMMARY_TABLE,
+        selected,
+        order_column,
+    )
+    if dataframe.empty:
+        return empty
+
+    rename = {}
+    if date_column:
+        rename[date_column] = "shift_date"
+    if location_column:
+        rename[location_column] = "location"
+    if role_column:
+        rename[role_column] = "role"
+    if employee_column:
+        rename[employee_column] = "employee"
+    if hours_column:
+        rename[hours_column] = "hours"
+    if regular_hours_column:
+        rename[regular_hours_column] = "regular_hours"
+    if ot_hours_column:
+        rename[ot_hours_column] = "ot_hours"
+    if clock_pair:
+        rename[clock_pair[0]] = "clock_in"
+        rename[clock_pair[1]] = "clock_out"
+    dataframe = dataframe.rename(columns=rename)
+
+    for column_name in ("role", "employee", "clock_in", "clock_out"):
+        if column_name not in dataframe.columns:
+            dataframe[column_name] = pd.NA
+
+    if "hours" not in dataframe.columns:
+        if (
+            "regular_hours" in dataframe.columns
+            or "ot_hours" in dataframe.columns
+        ):
+            regular_hours = (
+                dataframe["regular_hours"]
+                if "regular_hours" in dataframe.columns
+                else 0.0
+            )
+            ot_hours = (
+                dataframe["ot_hours"]
+                if "ot_hours" in dataframe.columns
+                else 0.0
+            )
+            dataframe["hours"] = (
+                pd.to_numeric(regular_hours, errors="coerce").fillna(0.0)
+                + pd.to_numeric(ot_hours, errors="coerce").fillna(0.0)
+            )
+        else:
+            dataframe["hours"] = 0.0
+
+    if "location" not in dataframe.columns:
+        dataframe["location"] = "Unknown"
+
+    if "shift_date" not in dataframe.columns:
+        dataframe["shift_date"] = pd.Series(
+            pd.NaT,
+            index=dataframe.index,
+            dtype="datetime64[ns]",
+        )
+    else:
+        dataframe["shift_date"] = pd.to_datetime(
+            dataframe["shift_date"],
+            errors="coerce",
+            utc=True,
+        ).dt.tz_localize(None)
+    dataframe["shift_date"] = dataframe["shift_date"].dt.normalize()
+
+    dataframe = _coerce_numeric(dataframe, ["hours"])
+    dataframe["hours"] = dataframe["hours"].fillna(0.0)
+    dataframe["role"] = (
+        dataframe["role"].fillna("Unassigned").astype(str)
+    )
+    dataframe["employee"] = (
+        dataframe["employee"].fillna("Unknown").astype(str)
+    )
+    dataframe = _add_location_key(dataframe)
+
+    return dataframe
 
 
 @st.cache_data(ttl=300)

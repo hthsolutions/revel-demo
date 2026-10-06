@@ -68,20 +68,13 @@ def summarize_combos(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def share_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    """Add each row's share of net sales and a bar label."""
+    """Add each row's share of net sales."""
 
     chart_df = frame.copy()
     sales_total = float(chart_df["net_sales"].sum())
     chart_df["mix"] = (
         chart_df["net_sales"] / sales_total if sales_total else 0.0
     )
-    chart_df["bar_label"] = [
-        f"${sales:,.0f}  {share:.1%}"
-        for sales, share in zip(
-            chart_df["net_sales"],
-            chart_df["mix"],
-        )
-    ]
     return chart_df
 
 
@@ -89,15 +82,14 @@ def ranked_share_chart(
     frame: pd.DataFrame,
     category_column: str,
     series_title: str,
-) -> alt.LayerChart:
+) -> alt.Chart:
     """Horizontal bars ranked by share of combo net sales."""
 
     chart_df = share_frame(frame)
     order = chart_df[category_column].tolist()
-    mix_max = float(chart_df["mix"].max()) if not chart_df.empty else 0.0
-    base = alt.Chart(chart_df)
-    bars = (
-        base.mark_bar(color="#1f77b4")
+    return (
+        alt.Chart(chart_df)
+        .mark_bar(color="#1f77b4")
         .encode(
             y=alt.Y(
                 f"{category_column}:N",
@@ -108,7 +100,6 @@ def ranked_share_chart(
                 "mix:Q",
                 title="Share of combo net sales",
                 axis=alt.Axis(format=".0%"),
-                scale=alt.Scale(domain=[0, max(mix_max * 1.45, 0.01)]),
             ),
             tooltip=[
                 alt.Tooltip(
@@ -124,23 +115,7 @@ def ranked_share_chart(
                 alt.Tooltip("items:Q", title="Items", format=",.0f"),
             ],
         )
-    )
-    labels = (
-        base.mark_text(align="left", dx=4)
-        .encode(
-            y=alt.Y(
-                f"{category_column}:N",
-                title=None,
-                sort=order,
-            ),
-            x="mix:Q",
-            text="bar_label:N",
-        )
-    )
-    return (
-        alt.layer(bars, labels)
         .properties(height=max(36 * len(chart_df), 160))
-        .configure_view(strokeWidth=0, clip=False)
     )
 
 
@@ -550,24 +525,6 @@ if not builds.empty:
         "Regular, spicy, and other builds. Share uses net sales "
         "on the meal row, not the drink and side rows."
     )
-
-pieces = (
-    detail_df.groupby("product_subcategory", as_index=False)
-    .agg(
-        net_sales=("net_sales", "sum"),
-        items=("n_items", "sum"),
-    )
-    .sort_values("net_sales", ascending=False)
-)
-st.subheader("Where combo net sales land")
-st.altair_chart(
-    ranked_share_chart(pieces, "product_subcategory", "Piece"),
-    use_container_width=True,
-)
-st.caption(
-    "Meals, drinks, fries, and the other pieces inside the "
-    "combo total."
-)
 
 items_df = detail_df.copy()
 items_df["item"] = items_df["product_name"].map(clean_product_name)

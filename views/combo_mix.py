@@ -40,6 +40,43 @@ def format_day(business_date) -> str:
     return f"{WEEKDAY_NAMES[stamp.weekday()][:3]} {stamp:%m/%d}"
 
 
+def format_percent(value) -> str:
+    """Render a 0–1 share as a percent, or an em dash."""
+
+    if value is None or pd.isna(value):
+        return "—"
+    return f"{value:.1%}"
+
+
+def store_net_sales_for(
+    sales_frame: pd.DataFrame,
+    location_keys,
+    business_dates,
+) -> float:
+    """Total store net sales for the same locations and dates."""
+
+    if sales_frame.empty or "net_sales" not in sales_frame.columns:
+        return float("nan")
+
+    store_sales = sales_frame.copy()
+    store_sales["business_date"] = pd.to_datetime(
+        store_sales["business_date"],
+        errors="coerce",
+    ).dt.normalize()
+    period_dates = set(
+        pd.to_datetime(pd.Series(business_dates))
+        .dt.normalize()
+        .dt.date
+    )
+    store_sales = store_sales[
+        store_sales["location_key"].isin(location_keys)
+        & store_sales["business_date"].dt.date.isin(period_dates)
+    ]
+    if store_sales.empty:
+        return float("nan")
+    return float(store_sales["net_sales"].sum())
+
+
 def clean_product_name(name) -> str:
     """Drop the asterisks Revel wraps around combo builds."""
 
@@ -226,10 +263,26 @@ def _sum(frame: pd.DataFrame, column_name: str) -> float:
 
 net_sales = _sum(detail_df, "net_sales")
 previous_net_sales = _sum(previous_detail, "net_sales")
-items = _sum(detail_df, "n_items")
-discounts = _sum(detail_df, "discounts")
-sales_per_item = net_sales / items if items else float("nan")
 sales_growth = percent_change(net_sales, previous_net_sales)
+store_net_sales = store_net_sales_for(
+    sales_df,
+    location_df["location_key"].unique(),
+    period_df["business_date"],
+)
+combo_share_of_sales = (
+    net_sales / store_net_sales
+    if pd.notna(store_net_sales) and store_net_sales
+    else float("nan")
+)
+combo_rank_period = summarize_combos(period_df)
+top_combo = combo_rank_period.iloc[0]
+top_combo_name = top_combo["product_class"]
+top_combo_of_combos = float(top_combo["mix"])
+top_combo_of_sales = (
+    float(top_combo["net_sales"]) / store_net_sales
+    if pd.notna(store_net_sales) and store_net_sales
+    else float("nan")
+)
 
 period_title = (
     format_week(selected_week)
@@ -257,18 +310,31 @@ kpi_columns[0].metric(
     ),
 )
 kpi_columns[1].metric(
-    "Items",
-    format_metric_value(items, "count"),
-    help="Pieces sold inside the combos, including sides and drinks.",
+    "Combo share of net sales",
+    format_percent(combo_share_of_sales),
+    help=(
+        "The combo net sales above, divided by total store "
+        "net sales for this location, week, and day."
+    ),
 )
 kpi_columns[2].metric(
-    "Net sales / item",
-    format_metric_value(sales_per_item, "currency"),
+    "Highest selling combo",
+    top_combo_name,
+    help=escape_dollar_signs(
+        f"{format_metric_value(top_combo['net_sales'], 'currency')} "
+        "in combo net sales."
+    ),
 )
 kpi_columns[3].metric(
-    "Discounts",
-    format_metric_value(discounts, "currency"),
-    help="Item discounts plus order discounts on these combo rows.",
+    f"{top_combo_name} share",
+    (
+        f"{format_percent(top_combo_of_sales)} of total · "
+        f"{format_percent(top_combo_of_combos)} of combos"
+    ),
+    help=(
+        "That combo's sales as a percent of total store net "
+        "sales, then as a percent of combo net sales."
+    ),
 )
 st.caption(f"The change on combo net sales is versus {comparison_label}.")
 
@@ -442,27 +508,6 @@ if days_in_latest_week < 7:
     )
 
 mix_df = summarize_combos(period_df)
-store_net_sales = float("nan")
-if not sales_df.empty and "net_sales" in sales_df.columns:
-    store_sales = sales_df.copy()
-    store_sales["business_date"] = pd.to_datetime(
-        store_sales["business_date"],
-        errors="coerce",
-    ).dt.normalize()
-    period_dates = set(
-        pd.to_datetime(period_df["business_date"])
-        .dt.normalize()
-        .dt.date
-    )
-    store_sales = store_sales[
-        store_sales["location_key"].isin(
-            location_df["location_key"].unique()
-        )
-        & store_sales["business_date"].dt.date.isin(period_dates)
-    ]
-    if not store_sales.empty:
-        store_net_sales = float(store_sales["net_sales"].sum())
-
 if pd.notna(store_net_sales) and store_net_sales:
     mix_df["share_of_total"] = mix_df["net_sales"] / store_net_sales
 else:

@@ -584,6 +584,16 @@ if selected_day_label == "All days" and len(day_order) > 1:
     )
     row_order = [*day_order, "Week"]
 
+rate_max = heatmap_df["sales_per_labor_hour"].max(skipna=True)
+if pd.isna(rate_max) or rate_max <= 0:
+    rate_max = 1.0
+label_cutoff = float(rate_max) * 0.5
+color_scale = alt.Scale(
+    scheme="yelloworangered",
+    domain=[0, float(rate_max)],
+    clamp=True,
+)
+
 heatmap_base = alt.Chart(heatmap_df)
 hour_sort = alt.SortField(field="hour_index")
 heatmap_rects = (
@@ -604,7 +614,7 @@ heatmap_rects = (
         color=alt.Color(
             "sales_per_labor_hour:Q",
             title="SpLH",
-            scale=alt.Scale(scheme="yelloworangered"),
+            scale=color_scale,
             legend=alt.Legend(format="$,.0f", orient="right"),
         ),
         tooltip=[
@@ -616,13 +626,7 @@ heatmap_rects = (
 heatmap_labels = (
     heatmap_base
     .transform_filter("isValid(datum.sales_per_labor_hour)")
-    .mark_text(
-        fontSize=12,
-        fontWeight="bold",
-        color="#1a1a1a",
-        stroke="white",
-        strokeWidth=1,
-    )
+    .mark_text(fontSize=12, fontWeight="bold")
     .encode(
         x=alt.X(
             "hour_label:N",
@@ -637,6 +641,11 @@ heatmap_labels = (
         text=alt.Text(
             "sales_per_labor_hour:Q",
             format="$.0f",
+        ),
+        color=alt.condition(
+            alt.datum.sales_per_labor_hour >= label_cutoff,
+            alt.value("white"),
+            alt.value("#1a1a1a"),
         ),
     )
 )

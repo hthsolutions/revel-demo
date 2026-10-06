@@ -283,6 +283,22 @@ top_combo_of_sales = (
     if pd.notna(store_net_sales) and store_net_sales
     else float("nan")
 )
+top_builds = period_df[
+    (period_df["product_class"] == top_combo_name)
+    & period_df["product_subcategory"].isin(MEAL_SUBCATEGORIES)
+]
+if top_builds.empty:
+    top_build_name = "—"
+else:
+    top_build_name = (
+        top_builds.assign(
+            build=top_builds["product_name"].map(clean_product_name)
+        )
+        .groupby("build")["net_sales"]
+        .sum()
+        .sort_values(ascending=False)
+        .index[0]
+    )
 
 period_title = (
     format_week(selected_week)
@@ -325,7 +341,7 @@ sales_columns[2].metric(
         "in combo net sales."
     ),
 )
-top_columns = st.columns(2)
+top_columns = st.columns(3)
 top_columns[0].metric(
     f"{top_combo_name} share of total net sales",
     format_percent(top_combo_of_sales),
@@ -333,6 +349,10 @@ top_columns[0].metric(
 top_columns[1].metric(
     f"{top_combo_name} share of combo net sales",
     format_percent(top_combo_of_combos),
+)
+top_columns[2].metric(
+    f"Highest selling {top_combo_name} type",
+    top_build_name,
 )
 st.caption(f"The change on combo net sales is versus {comparison_label}.")
 

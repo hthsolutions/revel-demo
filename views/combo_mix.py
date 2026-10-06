@@ -162,7 +162,7 @@ except Exception as error:
 if combo_df.empty:
     st.warning(
         "No combo rows were returned. Check that "
-        "revel_combo_mix has data for this account."
+        "daily-product-mix-combomix has data for this account."
     )
     st.stop()
 

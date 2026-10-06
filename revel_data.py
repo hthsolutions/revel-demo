@@ -18,7 +18,7 @@ SHIFT_TABLE = "daily_employee_shift_timeworked_summary"
 SALARY_TABLE = "daily_salary"
 HOURLY_SALES_TABLE = "revel_hourly_sales"
 SHIFT_SUMMARY_TABLE = SHIFT_TABLE
-COMBO_MIX_TABLE = "revel_combo_mix"
+COMBO_MIX_TABLE = "daily-product-mix-combomix"
 
 # PostgREST returns at most 1,000 rows per request.
 PAGE_SIZE = 1000

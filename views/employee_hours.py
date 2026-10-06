@@ -146,7 +146,8 @@ st.title("Hourly Employee Hours")
 st.caption(
     "One week at a time. Each day is a clock from midnight "
     "to midnight. Green is the shift on that clock, and it "
-    "turns red for the overtime at the end of the shift."
+    "turns red for the overtime at the end of the shift. "
+    "GM shifts are excluded."
 )
 
 try:
@@ -203,6 +204,13 @@ shift_df.loc[shift_df["employee"] == "", "employee"] = "Unknown"
 shift_df = shift_df.merge(clock_df, on="record_key", how="left")
 shift_df["clock_in"] = shift_df["clock_in"].map(parse_store_clock)
 shift_df["clock_out"] = shift_df["clock_out"].map(parse_store_clock)
+shift_df = shift_df[
+    shift_df["role"].astype(str).str.strip().str.upper() != "GM"
+].copy()
+
+if shift_df.empty:
+    st.warning("No hourly shifts remain after excluding GM.")
+    st.stop()
 
 
 # ---------------------------------------------------------

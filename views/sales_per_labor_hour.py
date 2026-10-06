@@ -685,6 +685,93 @@ st.caption(
     "sales on the right axis, for the same hours."
 )
 
+share_hours = active_hours.copy()
+total_labor_hours_shown = float(
+    share_hours["labor_hours"].fillna(0).sum()
+)
+total_sales_shown = float(share_hours["sales"].fillna(0).sum())
+if total_labor_hours_shown:
+    share_hours["labor_hour_percent"] = (
+        share_hours["labor_hours"].fillna(0)
+        / total_labor_hours_shown
+        * 100
+    )
+else:
+    share_hours["labor_hour_percent"] = float("nan")
+if total_sales_shown:
+    share_hours["sales_percent"] = (
+        share_hours["sales"].fillna(0) / total_sales_shown * 100
+    )
+else:
+    share_hours["sales_percent"] = float("nan")
+
+share_tooltip = [
+    alt.Tooltip("hour_label:N", title="Hour"),
+    alt.Tooltip(
+        "labor_hour_percent:Q",
+        title="Labor Hours % of Total",
+        format=".1f",
+    ),
+    alt.Tooltip(
+        "sales_percent:Q",
+        title="Sales % of Total",
+        format=".1f",
+    ),
+    alt.Tooltip(
+        "labor_hours:Q",
+        title="Labor Hours",
+        format=",.2f",
+    ),
+    alt.Tooltip("sales:Q", title="Sales", format="$,.2f"),
+]
+percent_axis = alt.Axis(
+    format=".1f",
+    labelExpr="datum.value + '%'",
+)
+labor_share_bars = (
+    alt.Chart(share_hours)
+    .mark_bar(color="#1f77b4", opacity=0.75)
+    .encode(
+        x=hour_axis(),
+        y=alt.Y(
+            "labor_hour_percent:Q",
+            title="Percent of Total",
+            axis=percent_axis,
+        ),
+        tooltip=share_tooltip,
+    )
+)
+share_sales_line = (
+    alt.Chart(share_hours)
+    .mark_line(
+        color="#ff7f0e",
+        strokeWidth=2.5,
+        point=alt.OverlayMarkDef(size=55, color="#ff7f0e"),
+    )
+    .encode(
+        x=hour_axis(),
+        y=alt.Y(
+            "sales_percent:Q",
+            title="Percent of Total",
+            axis=percent_axis,
+        ),
+        tooltip=share_tooltip,
+    )
+)
+share_chart = (
+    alt.layer(labor_share_bars, share_sales_line)
+    .resolve_scale(y="shared")
+    .properties(height=360)
+)
+
+st.subheader("% of Labor Hours and % of Sales")
+st.altair_chart(share_chart, use_container_width=True)
+st.caption(
+    "Bars are each hour's labor hours as a percent of "
+    "total labor hours. The line is that hour's sales as "
+    "a percent of total sales, on the same scale."
+)
+
 table_df = active_hours.sort_values("hour_index")[
     [
         "hour_label",

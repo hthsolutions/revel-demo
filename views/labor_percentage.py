@@ -1607,6 +1607,26 @@ if not ot_role_df.empty:
 ot_percent_df = visible_weeks_df[
     ["week_label", "ot_labor", "ot_hours", "total_labor"]
 ].copy()
+
+# Total OT hours on this chart leave out the GM role.
+# Overtime dollars stay as recorded, including GM.
+if not ot_role_df.empty:
+    non_gm_ot_hours = (
+        ot_role_df.loc[
+            ot_role_df["role"].astype(str).str.strip().str.upper()
+            != "GM",
+            ["week_label", "ot_hours"],
+        ]
+        .groupby("week_label", as_index=False)["ot_hours"]
+        .sum()
+    )
+    ot_percent_df = ot_percent_df.drop(columns=["ot_hours"]).merge(
+        non_gm_ot_hours,
+        on="week_label",
+        how="left",
+    )
+    ot_percent_df["ot_hours"] = ot_percent_df["ot_hours"].fillna(0.0)
+
 ot_percent_df["ot_labor_percent"] = (
     safe_ratio(
         ot_percent_df["ot_labor"],
@@ -1698,7 +1718,8 @@ st.caption(
     "Bars are overtime pay on the left axis, split by "
     "role. Hover a segment for that role's overtime hours "
     "and overtime pay. The right axis is overtime pay "
-    "as a percent of total labor."
+    "as a percent of total labor. Total OT hours on the "
+    "line exclude the GM role."
 )
 
 

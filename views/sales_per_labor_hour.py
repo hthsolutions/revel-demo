@@ -9,7 +9,9 @@ import revel_data
 
 # A deploy can leave the already-imported data module in memory
 # while this page is read fresh from disk.
-if not hasattr(revel_data, "SHIFT_SUMMARY_TABLE"):
+if getattr(revel_data, "SHIFT_SUMMARY_TABLE", None) != (
+    "daily_employee_shift_timeworked_summary"
+):
     revel_data = importlib.reload(revel_data)
 
 from revel_data import (
@@ -363,9 +365,12 @@ if labor_df.empty:
     except Exception:
         column_names = []
     detail = (
-        "Columns on revel_shift_summary: " + ", ".join(column_names)
+        f"Columns on {SHIFT_SUMMARY_TABLE}: "
+        + ", ".join(column_names)
         if column_names
-        else "revel_shift_summary returned no clock columns."
+        else (
+            f"{SHIFT_SUMMARY_TABLE} returned no clock columns."
+        )
     )
     st.error(
         "Labor hours can't be placed on the clock without "

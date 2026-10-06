@@ -294,8 +294,8 @@ if selected_combo != "All combos":
 
 st.subheader(period_title)
 
-kpi_columns = st.columns(4)
-kpi_columns[0].metric(
+sales_columns = st.columns(3)
+sales_columns[0].metric(
     "Combo net sales",
     format_metric_value(net_sales, "currency"),
     delta=(
@@ -309,7 +309,7 @@ kpi_columns[0].metric(
         f"{format_metric_value(previous_net_sales, 'currency')}."
     ),
 )
-kpi_columns[1].metric(
+sales_columns[1].metric(
     "Combo share of net sales",
     format_percent(combo_share_of_sales),
     help=(
@@ -317,7 +317,7 @@ kpi_columns[1].metric(
         "net sales for this location, week, and day."
     ),
 )
-kpi_columns[2].metric(
+sales_columns[2].metric(
     "Highest selling combo",
     top_combo_name,
     help=escape_dollar_signs(
@@ -325,16 +325,14 @@ kpi_columns[2].metric(
         "in combo net sales."
     ),
 )
-kpi_columns[3].metric(
-    f"{top_combo_name} share",
-    (
-        f"{format_percent(top_combo_of_sales)} of total · "
-        f"{format_percent(top_combo_of_combos)} of combos"
-    ),
-    help=(
-        "That combo's sales as a percent of total store net "
-        "sales, then as a percent of combo net sales."
-    ),
+top_columns = st.columns(2)
+top_columns[0].metric(
+    f"{top_combo_name} share of total net sales",
+    format_percent(top_combo_of_sales),
+)
+top_columns[1].metric(
+    f"{top_combo_name} share of combo net sales",
+    format_percent(top_combo_of_combos),
 )
 st.caption(f"The change on combo net sales is versus {comparison_label}.")
 
@@ -526,9 +524,16 @@ total_share = mix_df.assign(
     share=mix_df["share_of_total"],
 )
 mix_long = pd.concat([combo_share, total_share], ignore_index=True)
+mix_long["bar_label"] = mix_long["share"].map(
+    lambda value: "" if pd.isna(value) else f"{value:.1%}"
+)
 combo_order = mix_df["product_class"].tolist()
-mix_chart = (
-    alt.Chart(mix_long)
+share_max = float(mix_long["share"].max(skipna=True))
+if pd.isna(share_max) or share_max <= 0:
+    share_max = 0.01
+mix_base = alt.Chart(mix_long)
+mix_bars = (
+    mix_base
     .mark_bar()
     .encode(
         y=alt.Y(
@@ -544,6 +549,7 @@ mix_chart = (
             "share:Q",
             title="Share",
             axis=alt.Axis(format=".0%"),
+            scale=alt.Scale(domain=[0, share_max * 1.28]),
         ),
         color=alt.Color(
             "series:N",
@@ -565,7 +571,33 @@ mix_chart = (
             alt.Tooltip("share:Q", title="Share", format=".1%"),
         ],
     )
-    .properties(height=max(52 * len(mix_df), 180))
+)
+mix_labels = (
+    mix_base
+    .transform_filter("isValid(datum.share)")
+    .mark_text(align="left", dx=4, fontSize=11)
+    .encode(
+        y=alt.Y(
+            "product_class:N",
+            title=None,
+            sort=combo_order,
+        ),
+        yOffset=alt.YOffset(
+            "series:N",
+            sort=share_series,
+        ),
+        x=alt.X(
+            "share:Q",
+            scale=alt.Scale(domain=[0, share_max * 1.28]),
+        ),
+        text="bar_label:N",
+        color=alt.value("#1a1a1a"),
+    )
+)
+mix_chart = (
+    alt.layer(mix_bars, mix_labels)
+    .properties(height=max(56 * len(mix_df), 200))
+    .configure_view(strokeWidth=0, clip=False)
 )
 st.subheader("Combo mix")
 st.altair_chart(mix_chart, use_container_width=True)

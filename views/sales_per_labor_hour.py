@@ -785,9 +785,11 @@ if selected_day_label == "All days" and len(day_order) > 1:
 rate_max = heatmap_df["sales_per_labor_hour"].max(skipna=True)
 if pd.isna(rate_max) or rate_max <= 0:
     rate_max = 1.0
-label_cutoff = float(rate_max) * 0.5
+# Red and dark green are both dark; the yellow middle stays light.
+light_label_low = float(rate_max) * 0.22
+light_label_high = float(rate_max) * 0.72
 color_scale = alt.Scale(
-    scheme="yelloworangered",
+    scheme="redyellowgreen",
     domain=[0, float(rate_max)],
     clamp=True,
 )
@@ -841,7 +843,10 @@ heatmap_labels = (
             format="$.0f",
         ),
         color=alt.condition(
-            alt.datum.sales_per_labor_hour >= label_cutoff,
+            (
+                (alt.datum.sales_per_labor_hour <= light_label_low)
+                | (alt.datum.sales_per_labor_hour >= light_label_high)
+            ),
             alt.value("white"),
             alt.value("#1a1a1a"),
         ),
@@ -859,15 +864,15 @@ st.altair_chart(heatmap, use_container_width=False)
 if selected_day_label == "All days" and len(day_order) > 1:
     st.caption(
         "Each cell is sales during that hour divided by "
-        "labor hours clocked during that hour. Darker "
-        "cells are a higher rate. The Week row pools "
-        "every day in the selection."
+        "labor hours clocked during that hour. Low rates "
+        "are red and high rates are dark green. The Week "
+        "row pools every day in the selection."
     )
 else:
     st.caption(
         "Each cell is sales during that hour divided by "
-        "labor hours clocked during that hour. Darker "
-        "cells are a higher rate."
+        "labor hours clocked during that hour. Low rates "
+        "are red and high rates are dark green."
     )
 
 labor_bars = (

@@ -545,13 +545,20 @@ day_plot["sales_per_labor_hour"] = (
     / day_plot["labor_hours"].where(day_plot["labor_hours"] > 0)
 )
 
+hour_label_order = (
+    active_hours.sort_values("hour_index")["hour_label"]
+    .drop_duplicates()
+    .tolist()
+)
+
+
 def hour_axis() -> alt.X:
     """Clock-hour axis in business-day order, 6 AM through 5 AM."""
 
     return alt.X(
         "hour_label:N",
         title="Hour",
-        sort=alt.SortField(field="hour_index"),
+        sort=hour_label_order,
     )
 rate_tooltip = [
     alt.Tooltip("hour_label:N", title="Hour"),

@@ -707,14 +707,10 @@ else:
 
 share_tooltip = [
     alt.Tooltip("hour_label:N", title="Hour"),
+    alt.Tooltip("series:N", title="Series"),
     alt.Tooltip(
-        "labor_hour_percent:Q",
-        title="Labor Hours % of Total",
-        format=".1f",
-    ),
-    alt.Tooltip(
-        "sales_percent:Q",
-        title="Sales % of Total",
+        "percent:Q",
+        title="Percent of Total",
         format=".1f",
     ),
     alt.Tooltip(
@@ -728,52 +724,55 @@ percent_axis = alt.Axis(
     format=".1f",
     labelExpr="datum.value + '%'",
 )
-labor_share_line = (
-    alt.Chart(share_hours)
-    .mark_line(
-        color="#1f77b4",
-        strokeWidth=2.5,
-        point=alt.OverlayMarkDef(size=55, color="#1f77b4"),
-    )
-    .encode(
-        x=hour_axis(),
-        y=alt.Y(
-            "labor_hour_percent:Q",
-            title="Percent of Total",
-            axis=percent_axis,
-        ),
-        tooltip=share_tooltip,
-    )
+share_series_order = [
+    "Labor Hours % of Total",
+    "Sales % of Total",
+]
+labor_rows = share_hours.assign(
+    series=share_series_order[0],
+    percent=share_hours["labor_hour_percent"],
 )
-share_sales_line = (
-    alt.Chart(share_hours)
-    .mark_line(
-        color="#ff7f0e",
-        strokeWidth=2.5,
-        point=alt.OverlayMarkDef(size=55, color="#ff7f0e"),
-    )
-    .encode(
-        x=hour_axis(),
-        y=alt.Y(
-            "sales_percent:Q",
-            title="Percent of Total",
-            axis=percent_axis,
-        ),
-        tooltip=share_tooltip,
-    )
+sales_rows = share_hours.assign(
+    series=share_series_order[1],
+    percent=share_hours["sales_percent"],
+)
+share_long = pd.concat(
+    [labor_rows, sales_rows],
+    ignore_index=True,
 )
 share_chart = (
-    alt.layer(labor_share_line, share_sales_line)
-    .resolve_scale(y="shared")
+    alt.Chart(share_long)
+    .mark_line(
+        strokeWidth=2.5,
+        point=alt.OverlayMarkDef(size=55, filled=True),
+    )
+    .encode(
+        x=hour_axis(),
+        y=alt.Y(
+            "percent:Q",
+            title="Percent of Total",
+            axis=percent_axis,
+        ),
+        color=alt.Color(
+            "series:N",
+            title=None,
+            sort=share_series_order,
+            scale=alt.Scale(
+                domain=share_series_order,
+                range=["#1f77b4", "#ff7f0e"],
+            ),
+            legend=alt.Legend(orient="top"),
+        ),
+        tooltip=share_tooltip,
+    )
     .properties(height=360)
 )
 
 st.subheader("% of Labor Hours and % of Sales")
 st.altair_chart(share_chart, use_container_width=True)
 st.caption(
-    "The blue line is each hour's labor hours as a "
-    "percent of total labor hours. The orange line is "
-    "that hour's sales as a percent of total sales."
+    "Each line is that hour's share of the total for "
+    "this selection."
 )
 
 table_df = active_hours.sort_values("hour_index")[

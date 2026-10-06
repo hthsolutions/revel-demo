@@ -30,6 +30,10 @@ from revel_data import (
 # 6:00 AM and continues through 5:59 AM the next morning.
 BUSINESS_DAY_START_HOUR = 6
 STORE_TIMEZONE = ZoneInfo("America/Chicago")
+# Heatmap turns green at this sales-per-labor-hour rate.
+GREEN_SPLH = 70.0
+HEATMAP_RED = ((165, 0, 38), (239, 59, 44))
+HEATMAP_GREEN = ((116, 196, 118), (0, 68, 27))
 
 
 def format_week(week_start) -> str:
@@ -45,6 +49,66 @@ def format_day(business_date) -> str:
 
     stamp = pd.Timestamp(business_date)
     return f"{WEEKDAY_NAMES[stamp.weekday()][:3]} {stamp:%m/%d}"
+
+
+def _srgb_channel(value: float) -> float:
+    value = value / 255
+    if value <= 0.04045:
+        return value / 12.92
+    return ((value + 0.055) / 1.055) ** 2.4
+
+
+def heatmap_top(rate_max: float) -> float:
+    """Keep the green end of the scale above the $70 break."""
+
+    return max(float(rate_max), GREEN_SPLH + 0.01)
+
+
+def heatmap_stops(top: float):
+    """Red below $70, then light green through dark green."""
+
+    return (
+        (0.0, HEATMAP_RED[0]),
+        (GREEN_SPLH - 0.01, HEATMAP_RED[1]),
+        (GREEN_SPLH, HEATMAP_GREEN[0]),
+        (top, HEATMAP_GREEN[1]),
+    )
+
+
+def heatmap_fill(value, top: float):
+    """Match the piecewise red-to-green scale used on the heatmap."""
+
+    if pd.isna(value):
+        return None
+    stops = heatmap_stops(top)
+    amount = float(value)
+    if amount <= stops[0][0]:
+        return stops[0][1]
+    for (left_value, left_color), (right_value, right_color) in zip(
+        stops, stops[1:]
+    ):
+        if amount <= right_value:
+            span = right_value - left_value
+            blend = 0.0 if span == 0 else (amount - left_value) / span
+            return tuple(
+                round(
+                    left_color[index]
+                    + (right_color[index] - left_color[index]) * blend
+                )
+                for index in range(3)
+            )
+    return stops[-1][1]
+
+
+def heatmap_label_color(value, top: float) -> str:
+    """Use white type on dark red and dark green cells."""
+
+    fill = heatmap_fill(value, top)
+    if fill is None:
+        return "#1a1a1a"
+    red, green, blue = (_srgb_channel(part) for part in fill)
+    luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+    return "#ffffff" if luminance < 0.42 else "#1a1a1a"
 
 
 def hour_label(hour: int) -> str:
@@ -785,12 +849,17 @@ if selected_day_label == "All days" and len(day_order) > 1:
 rate_max = heatmap_df["sales_per_labor_hour"].max(skipna=True)
 if pd.isna(rate_max) or rate_max <= 0:
     rate_max = 1.0
-# Red and dark green are both dark; the yellow middle stays light.
-light_label_low = float(rate_max) * 0.22
-light_label_high = float(rate_max) * 0.72
+scale_top = heatmap_top(rate_max)
+scale_stops = heatmap_stops(scale_top)
+heatmap_df["label_color"] = heatmap_df["sales_per_labor_hour"].map(
+    lambda value: heatmap_label_color(value, scale_top)
+)
 color_scale = alt.Scale(
-    scheme="redyellowgreen",
-    domain=[0, float(rate_max)],
+    domain=[stop[0] for stop in scale_stops],
+    range=[
+        "#{:02x}{:02x}{:02x}".format(*stop[1]) for stop in scale_stops
+    ],
+    interpolate="rgb",
     clamp=True,
 )
 
@@ -842,13 +911,10 @@ heatmap_labels = (
             "sales_per_labor_hour:Q",
             format="$.0f",
         ),
-        color=alt.condition(
-            (
-                (alt.datum.sales_per_labor_hour <= light_label_low)
-                | (alt.datum.sales_per_labor_hour >= light_label_high)
-            ),
-            alt.value("white"),
-            alt.value("#1a1a1a"),
+        color=alt.Color(
+            "label_color:N",
+            scale=None,
+            legend=None,
         ),
     )
 )
@@ -864,15 +930,17 @@ st.altair_chart(heatmap, use_container_width=False)
 if selected_day_label == "All days" and len(day_order) > 1:
     st.caption(
         "Each cell is sales during that hour divided by "
-        "labor hours clocked during that hour. Low rates "
-        "are red and high rates are dark green. The Week "
-        "row pools every day in the selection."
+        "labor hours clocked during that hour. Rates under "
+        "$70 are red. Rates of $70 and above are green, "
+        "darker as the rate rises. The Week row pools "
+        "every day in the selection."
     )
 else:
     st.caption(
         "Each cell is sales during that hour divided by "
-        "labor hours clocked during that hour. Low rates "
-        "are red and high rates are dark green."
+        "labor hours clocked during that hour. Rates under "
+        "$70 are red. Rates of $70 and above are green, "
+        "darker as the rate rises."
     )
 
 labor_bars = (

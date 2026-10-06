@@ -56,11 +56,11 @@ def hour_label(hour: int) -> str:
     return f"{display_hour} {suffix}"
 
 
-def hour_from_interval(label) -> int | None:
-    """Read the starting clock hour from a 15-minute label."""
+def interval_start_parts(label) -> tuple[int | None, int | None]:
+    """Read the starting hour and minute from a 15-minute label."""
 
     if label is None or pd.isna(label):
-        return None
+        return None, None
 
     text = (
         str(label)
@@ -70,14 +70,89 @@ def hour_from_interval(label) -> int | None:
         .strip()
     )
     if text == "" or text.lower() in {"none", "nat", "null"}:
-        return None
+        return None, None
 
     parsed = pd.to_datetime(text, format="%I:%M %p", errors="coerce")
     if pd.isna(parsed):
         parsed = pd.to_datetime(text, errors="coerce")
     if pd.isna(parsed):
-        return None
-    return int(parsed.hour)
+        return None, None
+    return int(parsed.hour), int(parsed.minute)
+
+
+def hour_from_interval(label) -> int | None:
+    """Read the starting clock hour from a 15-minute label."""
+
+    hour, _minute = interval_start_parts(label)
+    return hour
+
+
+def rush_time_choices() -> list[tuple[str, int]]:
+    """Clock times every 15 minutes, in business-day order.
+
+    The value is minutes after 6:00 AM. The last choice is
+    6:00 AM the next morning, so a window can run overnight.
+    """
+
+    choices = []
+    for step in range((24 * 4) + 1):
+        minutes_from_open = step * 15
+        clock_minutes = (6 * 60 + minutes_from_open) % (24 * 60)
+        hour = clock_minutes // 60
+        minute = clock_minutes % 60
+        suffix = "AM" if hour < 12 else "PM"
+        display_hour = hour % 12 or 12
+        label = f"{display_hour}:{minute:02d} {suffix}"
+        if step == 24 * 4:
+            label = "6:00 AM next day"
+        choices.append((label, minutes_from_open))
+    return choices
+
+
+RUSH_TIME_CHOICES = rush_time_choices()
+RUSH_TIME_LABELS = [label for label, _minutes in RUSH_TIME_CHOICES]
+RUSH_TIME_MINUTES = dict(RUSH_TIME_CHOICES)
+
+
+def rush_splh(
+    quarter_df: pd.DataFrame,
+    hour_df: pd.DataFrame,
+    start_minutes: int,
+    end_minutes: int,
+) -> tuple[float, float, float]:
+    """Sales per labor hour for one window on the business clock.
+
+    A 15-minute sales interval counts when it starts inside
+    the window. Labor hours are the overlap of each clock
+    hour with that same window.
+    """
+
+    if end_minutes <= start_minutes:
+        return float("nan"), 0.0, 0.0
+
+    quarters = quarter_df.copy()
+    quarters["quarter_start"] = (
+        (quarters["hour"] - BUSINESS_DAY_START_HOUR) % 24
+    ) * 60 + quarters["minute"]
+    in_window = quarters[
+        (quarters["quarter_start"] >= start_minutes)
+        & (quarters["quarter_start"] < end_minutes)
+    ]
+    sales = float(in_window["sales"].sum()) if not in_window.empty else 0.0
+
+    hours = hour_df.copy()
+    hour_start = (
+        (hours["hour"] - BUSINESS_DAY_START_HOUR) % 24
+    ) * 60
+    overlap_minutes = (
+        hour_start.add(60).clip(upper=end_minutes)
+        - hour_start.clip(lower=start_minutes)
+    ).clip(lower=0)
+    labor_hours = float(
+        (hours["labor_hours"] * overlap_minutes / 60).sum()
+    )
+    rate = sales / labor_hours if labor_hours else float("nan")
+    return rate, sales, labor_hours
 
 
 def parse_store_clock(value):
@@ -357,6 +432,36 @@ if sales_df.empty:
     st.warning("Hourly sales intervals have no readable times.")
     st.stop()
 sales_df["hour"] = sales_df["hour"].astype(int)
+clock_parts = sales_df["time"].map(interval_start_parts)
+sales_df["minute"] = pd.Series(
+    [parts[1] for parts in clock_parts],
+    index=sales_df.index,
+)
+if (
+    "interval_label" in sales_df.columns
+    and sales_df["minute"].isna().any()
+):
+    fallback_parts = sales_df["interval_label"].map(
+        interval_start_parts
+    )
+    sales_df["minute"] = sales_df["minute"].fillna(
+        pd.Series(
+            [parts[1] for parts in fallback_parts],
+            index=sales_df.index,
+        )
+    )
+sales_df["minute"] = sales_df["minute"].fillna(0).astype(int)
+sales_quarters = sales_df[
+    [
+        "location",
+        "location_key",
+        "business_date",
+        "hour",
+        "minute",
+        "sales",
+        "transactions",
+    ]
+].copy()
 
 labor_df = labor_hours_by_hour(shift_df)
 if labor_df.empty:
@@ -443,7 +548,11 @@ if combined.empty:
     st.warning("No sales or labor hours match that location.")
     st.stop()
 
+sales_quarters = sales_quarters[
+    sales_quarters["location_key"].isin(combined["location_key"].unique())
+].copy()
 combined = add_week_columns(combined, week_start_weekday)
+sales_quarters = add_week_columns(sales_quarters, week_start_weekday)
 week_starts = sorted(
     combined["week_start"].dropna().unique(),
     reverse=True,
@@ -456,6 +565,9 @@ selected_week = st.sidebar.selectbox(
 
 week_df = combined[
     combined["week_start"] == selected_week
+].copy()
+quarter_df = sales_quarters[
+    sales_quarters["week_start"] == selected_week
 ].copy()
 
 if week_df.empty:
@@ -476,6 +588,28 @@ selected_day_label = st.sidebar.selectbox(
     options=["All days", *day_labels.values()],
 )
 
+st.sidebar.header("Rush windows")
+lunch_start_label = st.sidebar.selectbox(
+    "Lunch rush start",
+    options=RUSH_TIME_LABELS,
+    index=RUSH_TIME_LABELS.index("11:00 AM"),
+)
+lunch_end_label = st.sidebar.selectbox(
+    "Lunch rush end",
+    options=RUSH_TIME_LABELS,
+    index=RUSH_TIME_LABELS.index("1:00 PM"),
+)
+dinner_start_label = st.sidebar.selectbox(
+    "Dinner rush start",
+    options=RUSH_TIME_LABELS,
+    index=RUSH_TIME_LABELS.index("5:00 PM"),
+)
+dinner_end_label = st.sidebar.selectbox(
+    "Dinner rush end",
+    options=RUSH_TIME_LABELS,
+    index=RUSH_TIME_LABELS.index("8:00 PM"),
+)
+
 if selected_day_label != "All days":
     selected_dates = [
         business_date
@@ -485,6 +619,27 @@ if selected_day_label != "All days":
     week_df = week_df[
         week_df["business_date"].isin(selected_dates)
     ].copy()
+    quarter_df = quarter_df[
+        quarter_df["business_date"].isin(selected_dates)
+    ].copy()
+
+day_scope = (
+    selected_day_label
+    if selected_day_label != "All days"
+    else "all days this week"
+)
+lunch_rate, lunch_sales, lunch_hours = rush_splh(
+    quarter_df,
+    week_df,
+    RUSH_TIME_MINUTES[lunch_start_label],
+    RUSH_TIME_MINUTES[lunch_end_label],
+)
+dinner_rate, dinner_sales, dinner_hours = rush_splh(
+    quarter_df,
+    week_df,
+    RUSH_TIME_MINUTES[dinner_start_label],
+    RUSH_TIME_MINUTES[dinner_end_label],
+)
 
 total_sales = float(week_df["sales"].sum())
 total_labor_hours = float(week_df["labor_hours"].sum())
@@ -510,6 +665,42 @@ kpi_columns[2].metric(
     "SpLH",
     "—" if pd.isna(overall_rate) else f"${overall_rate:,.2f}",
 )
+
+rush_columns = st.columns(2)
+rush_columns[0].metric(
+    "Lunch SpLH",
+    "—" if pd.isna(lunch_rate) else f"${lunch_rate:,.2f}",
+    help=(
+        f"{lunch_start_label} – {lunch_end_label} for "
+        f"{day_scope}. ${lunch_sales:,.2f} sales and "
+        f"{lunch_hours:,.2f} labor hours."
+    ),
+)
+rush_columns[1].metric(
+    "Dinner SpLH",
+    "—" if pd.isna(dinner_rate) else f"${dinner_rate:,.2f}",
+    help=(
+        f"{dinner_start_label} – {dinner_end_label} for "
+        f"{day_scope}. ${dinner_sales:,.2f} sales and "
+        f"{dinner_hours:,.2f} labor hours."
+    ),
+)
+if (
+    RUSH_TIME_MINUTES[lunch_end_label]
+    <= RUSH_TIME_MINUTES[lunch_start_label]
+    or RUSH_TIME_MINUTES[dinner_end_label]
+    <= RUSH_TIME_MINUTES[dinner_start_label]
+):
+    st.caption(
+        "A rush end time has to be later than its start "
+        "time. Overnight windows can end at 6:00 AM next day."
+    )
+else:
+    st.caption(
+        f"Lunch SpLH is {lunch_start_label}–{lunch_end_label}. "
+        f"Dinner SpLH is {dinner_start_label}–{dinner_end_label}. "
+        f"Both use {day_scope}."
+    )
 
 hour_totals = productivity(week_df, ["hour"])
 hour_totals = hour_totals.sort_values("hour_index")

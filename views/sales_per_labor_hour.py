@@ -1,8 +1,16 @@
+import importlib
 from zoneinfo import ZoneInfo
 
 import altair as alt
 import pandas as pd
 import streamlit as st
+
+import revel_data
+
+# A deploy can leave the already-imported data module in memory
+# while this page is read fresh from disk.
+if not hasattr(revel_data, "SHIFT_SUMMARY_TABLE"):
+    revel_data = importlib.reload(revel_data)
 
 from revel_data import (
     SHIFT_SUMMARY_TABLE,

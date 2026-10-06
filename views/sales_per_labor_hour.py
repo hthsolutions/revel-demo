@@ -573,68 +573,57 @@ rate_tooltip = [
     ),
 ]
 
-day_lines = (
-    alt.Chart(day_plot)
-    .mark_line(
-        strokeWidth=2,
-        point=alt.OverlayMarkDef(size=45),
+heatmap_df = day_plot.copy()
+row_order = list(day_order)
+if selected_day_label == "All days" and len(day_order) > 1:
+    week_row = active_hours.copy()
+    week_row["day_label"] = "Week"
+    heatmap_df = pd.concat(
+        [heatmap_df, week_row],
+        ignore_index=True,
     )
+    row_order = [*day_order, "Week"]
+
+heatmap = (
+    alt.Chart(heatmap_df)
+    .mark_rect(stroke="white", strokeWidth=1)
     .encode(
-        x=hour_axis(),
+        x=alt.X(
+            "hour_label:N",
+            title="Hour",
+            sort=alt.SortField(field="hour_index"),
+        ),
         y=alt.Y(
-            "sales_per_labor_hour:Q",
-            title="SpLH",
-            axis=alt.Axis(format="$,.0f"),
+            "day_label:N",
+            title=None,
+            sort=row_order,
         ),
         color=alt.Color(
-            "day_label:N",
-            title="Day",
-            sort=day_order,
+            "sales_per_labor_hour:Q",
+            title="SpLH",
+            scale=alt.Scale(scheme="yelloworangered"),
+            legend=alt.Legend(format="$,.0f", orient="right"),
         ),
         tooltip=[
             alt.Tooltip("day_label:N", title="Day"),
             *rate_tooltip,
         ],
     )
+    .properties(height=max(220, 42 * len(row_order)))
 )
-
-chart_layers = [day_lines]
-if selected_day_label == "All days" and len(day_order) > 1:
-    week_line = (
-        alt.Chart(active_hours)
-        .mark_line(
-            color="#222222",
-            strokeWidth=3.5,
-            point=alt.OverlayMarkDef(size=70, color="#222222"),
-        )
-        .encode(
-            x=hour_axis(),
-            y=alt.Y(
-                "sales_per_labor_hour:Q",
-                title="SpLH",
-                axis=alt.Axis(format="$,.0f"),
-            ),
-            tooltip=rate_tooltip,
-        )
-    )
-    chart_layers.append(week_line)
-
-rate_chart = (
-    alt.layer(*chart_layers)
-    .resolve_scale(color="independent", y="shared")
-    .properties(height=420)
-)
-st.altair_chart(rate_chart, use_container_width=True)
+st.altair_chart(heatmap, use_container_width=True)
 if selected_day_label == "All days" and len(day_order) > 1:
     st.caption(
-        "Each colored line is one business day. The dark "
-        "line pools the week: sales in that hour divided "
-        "by labor hours in that hour."
+        "Each cell is sales during that hour divided by "
+        "labor hours clocked during that hour. Darker "
+        "cells are a higher rate. The Week row pools "
+        "every day in the selection."
     )
 else:
     st.caption(
-        "Each point is sales during that hour divided by "
-        "labor hours clocked during that hour."
+        "Each cell is sales during that hour divided by "
+        "labor hours clocked during that hour. Darker "
+        "cells are a higher rate."
     )
 
 labor_bars = (

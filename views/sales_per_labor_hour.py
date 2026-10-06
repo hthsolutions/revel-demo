@@ -768,7 +768,7 @@ share_chart = (
     .properties(height=360)
 )
 
-st.subheader("% of Labor Hours and % of Sales")
+st.subheader("Hourly Sales & Labor Distribution")
 st.altair_chart(share_chart, use_container_width=True)
 st.caption(
     "Each line is that hour's share of the total for "

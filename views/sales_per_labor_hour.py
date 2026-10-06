@@ -32,8 +32,8 @@ BUSINESS_DAY_START_HOUR = 6
 STORE_TIMEZONE = ZoneInfo("America/Chicago")
 # Heatmap turns green at this sales-per-labor-hour rate.
 GREEN_SPLH = 70.0
-HEATMAP_RED = ((165, 0, 38), (239, 59, 44))
-HEATMAP_GREEN = ((116, 196, 118), (0, 68, 27))
+HEATMAP_RED = ((103, 0, 13), (239, 59, 44))
+HEATMAP_GREEN = ((102, 189, 99), (0, 68, 27))
 
 
 def format_week(week_start) -> str:
@@ -64,40 +64,35 @@ def heatmap_top(rate_max: float) -> float:
     return max(float(rate_max), GREEN_SPLH + 0.01)
 
 
-def heatmap_stops(top: float):
-    """Red below $70, then light green through dark green."""
-
-    return (
-        (0.0, HEATMAP_RED[0]),
-        (GREEN_SPLH - 0.01, HEATMAP_RED[1]),
-        (GREEN_SPLH, HEATMAP_GREEN[0]),
-        (top, HEATMAP_GREEN[1]),
+def _mix_color(start, end, amount: float):
+    blend = min(max(amount, 0.0), 1.0)
+    return tuple(
+        round(start[index] + (end[index] - start[index]) * blend)
+        for index in range(3)
     )
 
 
 def heatmap_fill(value, top: float):
-    """Match the piecewise red-to-green scale used on the heatmap."""
+    """Red shades under $70, and green shades from $70 upward."""
 
     if pd.isna(value):
         return None
-    stops = heatmap_stops(top)
     amount = float(value)
-    if amount <= stops[0][0]:
-        return stops[0][1]
-    for (left_value, left_color), (right_value, right_color) in zip(
-        stops, stops[1:]
-    ):
-        if amount <= right_value:
-            span = right_value - left_value
-            blend = 0.0 if span == 0 else (amount - left_value) / span
-            return tuple(
-                round(
-                    left_color[index]
-                    + (right_color[index] - left_color[index]) * blend
-                )
-                for index in range(3)
-            )
-    return stops[-1][1]
+    if amount >= GREEN_SPLH:
+        span = max(float(top) - GREEN_SPLH, 0.01)
+        return _mix_color(
+            HEATMAP_GREEN[0],
+            HEATMAP_GREEN[1],
+            (amount - GREEN_SPLH) / span,
+        )
+    return _mix_color(HEATMAP_RED[0], HEATMAP_RED[1], amount / GREEN_SPLH)
+
+
+def heatmap_color_hex(value, top: float):
+    fill = heatmap_fill(value, top)
+    if fill is None:
+        return None
+    return "#{:02x}{:02x}{:02x}".format(*fill)
 
 
 def heatmap_label_color(value, top: float) -> str:
@@ -850,23 +845,33 @@ rate_max = heatmap_df["sales_per_labor_hour"].max(skipna=True)
 if pd.isna(rate_max) or rate_max <= 0:
     rate_max = 1.0
 scale_top = heatmap_top(rate_max)
-scale_stops = heatmap_stops(scale_top)
+heatmap_df["fill_color"] = heatmap_df["sales_per_labor_hour"].map(
+    lambda value: heatmap_color_hex(value, scale_top)
+)
 heatmap_df["label_color"] = heatmap_df["sales_per_labor_hour"].map(
     lambda value: heatmap_label_color(value, scale_top)
 )
-color_scale = alt.Scale(
-    domain=[stop[0] for stop in scale_stops],
-    range=[
-        "#{:02x}{:02x}{:02x}".format(*stop[1]) for stop in scale_stops
-    ],
-    interpolate="rgb",
-    clamp=True,
+legend_steps = 80
+legend_df = pd.DataFrame(
+    {
+        "rate": [
+            scale_top * step / legend_steps
+            for step in range(legend_steps + 1)
+        ]
+    }
 )
+legend_df["rate_end"] = legend_df["rate"].shift(-1)
+legend_df = legend_df.dropna()
+legend_df["fill_color"] = legend_df["rate"].map(
+    lambda value: heatmap_color_hex(value, scale_top)
+)
+legend_ticks = [0, GREEN_SPLH, scale_top]
 
 heatmap_base = alt.Chart(heatmap_df)
 hour_sort = alt.SortField(field="hour_index")
 heatmap_rects = (
     heatmap_base
+    .transform_filter("isValid(datum.sales_per_labor_hour)")
     .mark_rect(stroke="white", strokeWidth=1)
     .encode(
         x=alt.X(
@@ -881,10 +886,9 @@ heatmap_rects = (
             sort=row_order,
         ),
         color=alt.Color(
-            "sales_per_labor_hour:Q",
-            title="SpLH",
-            scale=color_scale,
-            legend=alt.Legend(format="$,.0f", orient="right"),
+            "fill_color:N",
+            scale=None,
+            legend=None,
         ),
         tooltip=[
             alt.Tooltip("day_label:N", title="Day"),
@@ -918,11 +922,28 @@ heatmap_labels = (
         ),
     )
 )
+heatmap_legend = (
+    alt.Chart(legend_df)
+    .mark_rect()
+    .encode(
+        y=alt.Y(
+            "rate:Q",
+            title="SpLH",
+            scale=alt.Scale(domain=[0, scale_top], nice=False),
+            axis=alt.Axis(format="$,.0f", values=legend_ticks),
+        ),
+        y2="rate_end:Q",
+        color=alt.Color("fill_color:N", scale=None, legend=None),
+    )
+    .properties(width=18, height=max(len(row_order), 1) * 46)
+)
 heatmap = (
-    alt.layer(heatmap_rects, heatmap_labels)
-    .properties(
-        width=alt.Step(72),
-        height=alt.Step(46),
+    alt.hconcat(
+        alt.layer(heatmap_rects, heatmap_labels).properties(
+            width=alt.Step(72),
+            height=alt.Step(46),
+        ),
+        heatmap_legend,
     )
     .configure_view(strokeWidth=0, clip=False)
 )

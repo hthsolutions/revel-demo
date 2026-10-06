@@ -7,10 +7,13 @@ from revel_data import (
     WEEKDAY_NAMES,
     MissingSecretError,
     add_week_columns,
+    escape_dollar_signs,
     format_metric_value,
     load_combo_mix,
+    load_sales_data,
     location_filter_controls,
     percent_change,
+    reindex_weekly,
 )
 
 
@@ -141,6 +144,11 @@ if combo_df.empty:
     )
     st.stop()
 
+try:
+    sales_df = load_sales_data()
+except Exception:
+    sales_df = pd.DataFrame()
+
 
 # ---------------------------------------------------------
 # Sidebar: location, week, day, and an optional combo
@@ -159,6 +167,12 @@ selected_week_start_name = st.sidebar.selectbox(
     options=list(WEEK_START_OPTIONS.keys()),
 )
 week_start_weekday = WEEK_START_OPTIONS[selected_week_start_name]
+weeks_to_display = st.sidebar.slider(
+    "Weeks to display",
+    min_value=2,
+    max_value=26,
+    value=8,
+)
 location_df = add_week_columns(location_df, week_start_weekday)
 
 week_starts = sorted(
@@ -304,20 +318,56 @@ st.caption(f"The change on combo net sales is versus {comparison_label}.")
 # Recent weeks, then the mix for the selected week
 # ---------------------------------------------------------
 
-weekly_df = (
+weekly_all = (
     location_df.groupby("week_start", as_index=False)
     .agg(net_sales=("net_sales", "sum"))
     .sort_values("week_start")
-    .tail(8)
-    .copy()
 )
+weekly_all = reindex_weekly(weekly_all, location_df["week_start"])
+weekly_all["previous_net_sales"] = weekly_all["net_sales"].shift(1)
+weekly_all["growth"] = [
+    percent_change(current, previous)
+    for current, previous in zip(
+        weekly_all["net_sales"],
+        weekly_all["previous_net_sales"],
+    )
+]
+selected_positions = weekly_all.index[
+    weekly_all["week_start"] == pd.Timestamp(selected_week)
+]
+if len(selected_positions):
+    window_end = int(selected_positions[0]) + 1
+    window_start = max(0, window_end - weeks_to_display)
+    weekly_df = weekly_all.iloc[window_start:window_end].copy()
+else:
+    weekly_df = weekly_all.tail(weeks_to_display).copy()
 weekly_df["week_label"] = weekly_df["week_start"].dt.strftime("%b %d")
-weekly_df["is_selected"] = weekly_df["week_start"] == pd.Timestamp(
-    selected_week
+weekly_df["is_selected"] = (
+    weekly_df["week_start"] == pd.Timestamp(selected_week)
 )
 week_label_order = weekly_df["week_label"].tolist()
 
-trend = (
+weekly_max = float(weekly_df["net_sales"].max(skipna=True))
+if pd.isna(weekly_max) or weekly_max <= 0:
+    weekly_axis_max = 1.0
+else:
+    weekly_axis_max = weekly_max * 1.05
+
+growth_values = weekly_df["growth"].dropna()
+if growth_values.empty:
+    growth_axis_min = -1.0
+    growth_axis_max = 1.0
+else:
+    raw_growth_min = min(0.0, float(growth_values.min()))
+    raw_growth_max = max(0.0, float(growth_values.max()))
+    growth_padding = max(
+        (raw_growth_max - raw_growth_min) * 0.10,
+        1.0,
+    )
+    growth_axis_min = raw_growth_min - growth_padding
+    growth_axis_max = raw_growth_max + growth_padding
+
+weekly_bars = (
     alt.Chart(weekly_df)
     .mark_bar()
     .encode(
@@ -330,27 +380,96 @@ trend = (
         y=alt.Y(
             "net_sales:Q",
             title="Combo net sales",
-            axis=alt.Axis(format="$,.0f"),
+            axis=alt.Axis(
+                format="$,.0f",
+                titleColor="#1f77b4",
+            ),
+            scale=alt.Scale(domain=[0, weekly_axis_max]),
         ),
         color=alt.condition(
             alt.datum.is_selected,
             alt.value("#1f77b4"),
-            alt.value("#c6dbef"),
+            alt.value("#9ecae1"),
         ),
         tooltip=[
             alt.Tooltip("week_label:N", title="Week of"),
             alt.Tooltip(
                 "net_sales:Q",
-                title="Net sales",
+                title="Combo net sales",
                 format="$,.2f",
+            ),
+            alt.Tooltip(
+                "growth:Q",
+                title="Week-over-week growth",
+                format="+.1f",
             ),
         ],
     )
-    .properties(height=280)
+)
+growth_line = (
+    alt.Chart(weekly_df)
+    .mark_line(
+        color="#ff7f0e",
+        strokeWidth=3,
+        point=alt.OverlayMarkDef(color="#ff7f0e", size=55),
+    )
+    .encode(
+        x=alt.X(
+            "week_label:N",
+            title=None,
+            sort=week_label_order,
+        ),
+        y=alt.Y(
+            "growth:Q",
+            title="Week-over-week growth",
+            axis=alt.Axis(
+                orient="right",
+                format=".1f",
+                labelExpr="datum.value + '%'",
+                titleColor="#ff7f0e",
+            ),
+            scale=alt.Scale(
+                domain=[growth_axis_min, growth_axis_max],
+                zero=False,
+            ),
+        ),
+        tooltip=[
+            alt.Tooltip("week_label:N", title="Week of"),
+            alt.Tooltip(
+                "growth:Q",
+                title="Week-over-week growth",
+                format="+.1f",
+            ),
+        ],
+    )
+)
+zero_growth_line = (
+    alt.Chart(pd.DataFrame({"zero_growth": [0.0]}))
+    .mark_rule(color="#6b7280", strokeWidth=2, strokeDash=[5, 5])
+    .encode(
+        y=alt.Y(
+            "zero_growth:Q",
+            axis=None,
+            scale=alt.Scale(
+                domain=[growth_axis_min, growth_axis_max],
+                zero=False,
+            ),
+        ),
+    )
+)
+trend = (
+    alt.layer(weekly_bars, growth_line, zero_growth_line)
+    .resolve_scale(y="independent")
+    .properties(height=320)
 )
 
 st.subheader("Combo net sales by week")
 st.altair_chart(trend, use_container_width=True)
+st.caption(
+    "Blue bars are weekly combo net sales. The darker bar is "
+    "the week selected above. The orange line is the change "
+    "versus the previous week, and the dashed line is 0%."
+)
 
 latest_week = location_df["week_start"].max()
 days_in_latest_week = location_df.loc[
@@ -364,15 +483,102 @@ if days_in_latest_week < 7:
     )
 
 mix_df = summarize_combos(period_df)
+store_net_sales = float("nan")
+if not sales_df.empty and "net_sales" in sales_df.columns:
+    store_sales = sales_df.copy()
+    store_sales["business_date"] = pd.to_datetime(
+        store_sales["business_date"],
+        errors="coerce",
+    ).dt.normalize()
+    period_dates = set(
+        pd.to_datetime(period_df["business_date"])
+        .dt.normalize()
+        .dt.date
+    )
+    store_sales = store_sales[
+        store_sales["location_key"].isin(
+            location_df["location_key"].unique()
+        )
+        & store_sales["business_date"].dt.date.isin(period_dates)
+    ]
+    if not store_sales.empty:
+        store_net_sales = float(store_sales["net_sales"].sum())
+
+if pd.notna(store_net_sales) and store_net_sales:
+    mix_df["share_of_total"] = mix_df["net_sales"] / store_net_sales
+else:
+    mix_df["share_of_total"] = float("nan")
+
+share_series = [
+    "Share of combo net sales",
+    "Share of total net sales",
+]
+combo_share = mix_df.assign(
+    series=share_series[0],
+    share=mix_df["mix"],
+)
+total_share = mix_df.assign(
+    series=share_series[1],
+    share=mix_df["share_of_total"],
+)
+mix_long = pd.concat([combo_share, total_share], ignore_index=True)
+combo_order = mix_df["product_class"].tolist()
+mix_chart = (
+    alt.Chart(mix_long)
+    .mark_bar()
+    .encode(
+        y=alt.Y(
+            "product_class:N",
+            title=None,
+            sort=combo_order,
+        ),
+        yOffset=alt.YOffset(
+            "series:N",
+            sort=share_series,
+        ),
+        x=alt.X(
+            "share:Q",
+            title="Share",
+            axis=alt.Axis(format=".0%"),
+        ),
+        color=alt.Color(
+            "series:N",
+            title=None,
+            sort=share_series,
+            scale=alt.Scale(
+                domain=share_series,
+                range=["#1f77b4", "#ff7f0e"],
+            ),
+        ),
+        tooltip=[
+            alt.Tooltip("product_class:N", title="Combo"),
+            alt.Tooltip("series:N", title="Share"),
+            alt.Tooltip(
+                "net_sales:Q",
+                title="Combo net sales",
+                format="$,.2f",
+            ),
+            alt.Tooltip("share:Q", title="Share", format=".1%"),
+        ],
+    )
+    .properties(height=max(52 * len(mix_df), 180))
+)
 st.subheader("Combo mix")
-st.altair_chart(
-    ranked_share_chart(mix_df, "product_class", "Combo"),
-    use_container_width=True,
-)
-st.caption(
-    "Share of combo net sales for this location, week, and day. "
-    "A larger bar is a larger part of the combo business."
-)
+st.altair_chart(mix_chart, use_container_width=True)
+if pd.isna(store_net_sales) or store_net_sales == 0:
+    st.caption(
+        "Blue is each combo's share of combo net sales. "
+        "Total store net sales were not available for an "
+        "orange comparison."
+    )
+else:
+    st.caption(
+        escape_dollar_signs(
+            "Blue is each combo's share of combo net sales. "
+            "Orange is that combo's share of total store net sales "
+            f"({format_metric_value(store_net_sales, 'currency')})."
+        )
+    )
 
 combo_table = mix_df.copy()
 previous_mix = summarize_combos(previous_df)
@@ -397,6 +603,7 @@ st.dataframe(
             "product_class",
             "net_sales",
             "mix",
+            "share_of_total",
             "items",
             "net_sales_per_item",
             "discounts",
@@ -413,7 +620,11 @@ st.dataframe(
             format="$%.2f",
         ),
         "mix": st.column_config.NumberColumn(
-            "Mix",
+            "Share of combo sales",
+            format="percent",
+        ),
+        "share_of_total": st.column_config.NumberColumn(
+            "Share of total net sales",
             format="percent",
         ),
         "items": st.column_config.NumberColumn(

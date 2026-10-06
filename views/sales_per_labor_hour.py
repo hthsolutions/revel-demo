@@ -775,7 +775,14 @@ share_long = pd.concat(
     [labor_rows, sales_rows],
     ignore_index=True,
 )
-share_chart = (
+share_long["percent_label"] = share_long["percent"].map(
+    lambda value: "" if pd.isna(value) else f"{value:.1f}%"
+)
+percent_max = share_long["percent"].max(skipna=True)
+if pd.isna(percent_max) or percent_max <= 0:
+    percent_max = 1.0
+percent_scale = alt.Scale(domain=[0, float(percent_max) * 1.2])
+share_bars = (
     alt.Chart(share_long)
     .mark_bar()
     .encode(
@@ -788,6 +795,7 @@ share_chart = (
             "percent:Q",
             title="Percent of Total",
             axis=percent_axis,
+            scale=percent_scale,
         ),
         color=alt.Color(
             "series:N",
@@ -801,6 +809,27 @@ share_chart = (
         ),
         tooltip=share_tooltip,
     )
+)
+share_labels = (
+    alt.Chart(share_long.dropna(subset=["percent"]))
+    .mark_text(fontSize=11, dy=-8)
+    .encode(
+        x=hour_axis(),
+        xOffset=alt.XOffset(
+            "series:N",
+            sort=share_series_order,
+        ),
+        y=alt.Y(
+            "percent:Q",
+            axis=None,
+            scale=percent_scale,
+        ),
+        text=alt.Text("percent_label:N"),
+        color=alt.value("#222222"),
+    )
+)
+share_chart = (
+    alt.layer(share_bars, share_labels)
     .properties(height=360)
 )
 

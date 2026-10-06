@@ -771,8 +771,7 @@ share_chart = (
 st.subheader("Hourly Sales & Labor Distribution")
 st.altair_chart(share_chart, use_container_width=True)
 st.caption(
-    "Each line is that hour's share of the total for "
-    "this selection."
+    "Each hour's share of total daily sales and labor hours. Differences show how labor deployment varies throughout the day relative to sales demand. "
 )
 
 table_df = active_hours.sort_values("hour_index")[

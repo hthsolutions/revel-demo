@@ -775,6 +775,77 @@ st.caption(
     "this selection."
 )
 
+cumulative_hours = share_hours.sort_values("hour_index").copy()
+if total_labor_hours_shown:
+    cumulative_hours["labor_cumulative_percent"] = (
+        cumulative_hours["labor_hour_percent"].fillna(0).cumsum()
+    )
+else:
+    cumulative_hours["labor_cumulative_percent"] = float("nan")
+if total_sales_shown:
+    cumulative_hours["sales_cumulative_percent"] = (
+        cumulative_hours["sales_percent"].fillna(0).cumsum()
+    )
+else:
+    cumulative_hours["sales_cumulative_percent"] = float("nan")
+
+cumulative_series_order = ["Labor Hours", "Sales"]
+cumulative_labor = cumulative_hours.assign(
+    series=cumulative_series_order[0],
+    total_percent=cumulative_hours["labor_cumulative_percent"],
+)
+cumulative_sales = cumulative_hours.assign(
+    series=cumulative_series_order[1],
+    total_percent=cumulative_hours["sales_cumulative_percent"],
+)
+cumulative_long = pd.concat(
+    [cumulative_labor, cumulative_sales],
+    ignore_index=True,
+)
+cumulative_chart = (
+    alt.Chart(cumulative_long)
+    .mark_line(
+        strokeWidth=2.5,
+        point=alt.OverlayMarkDef(size=55, filled=True),
+    )
+    .encode(
+        x=hour_axis(),
+        y=alt.Y(
+            "total_percent:Q",
+            title="Total %",
+            axis=percent_axis,
+            scale=alt.Scale(domain=[0, 100]),
+        ),
+        color=alt.Color(
+            "series:N",
+            title=None,
+            sort=cumulative_series_order,
+            scale=alt.Scale(
+                domain=cumulative_series_order,
+                range=["#1f77b4", "#ff7f0e"],
+            ),
+            legend=alt.Legend(orient="top"),
+        ),
+        tooltip=[
+            alt.Tooltip("hour_label:N", title="Hour"),
+            alt.Tooltip("series:N", title="Series"),
+            alt.Tooltip(
+                "total_percent:Q",
+                title="Total %",
+                format=".1f",
+            ),
+        ],
+    )
+    .properties(height=360)
+)
+
+st.subheader("Cumulative % of Labor Hours and Sales")
+st.altair_chart(cumulative_chart, use_container_width=True)
+st.caption(
+    "Each point is the running share from 6:00 AM "
+    "through that hour. Both lines end at 100%."
+)
+
 table_df = active_hours.sort_values("hour_index")[
     [
         "hour_label",

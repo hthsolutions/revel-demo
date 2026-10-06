@@ -81,47 +81,6 @@ def share_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return chart_df
 
 
-def ranked_share_chart(
-    frame: pd.DataFrame,
-    category_column: str,
-    series_title: str,
-) -> alt.Chart:
-    """Horizontal bars ranked by share of combo net sales."""
-
-    chart_df = share_frame(frame)
-    order = chart_df[category_column].tolist()
-    return (
-        alt.Chart(chart_df)
-        .mark_bar(color="#1f77b4")
-        .encode(
-            y=alt.Y(
-                f"{category_column}:N",
-                title=None,
-                sort=order,
-            ),
-            x=alt.X(
-                "mix:Q",
-                title="Share of combo net sales",
-                axis=alt.Axis(format=".0%"),
-            ),
-            tooltip=[
-                alt.Tooltip(
-                    f"{category_column}:N",
-                    title=series_title,
-                ),
-                alt.Tooltip(
-                    "net_sales:Q",
-                    title="Net sales",
-                    format="$,.2f",
-                ),
-                alt.Tooltip("mix:Q", title="Mix", format=".1%"),
-                alt.Tooltip("items:Q", title="Items", format=",.0f"),
-            ],
-        )
-        .properties(height=max(36 * len(chart_df), 160))
-    )
-
-
 st.title("Combo Mix")
 st.caption(
     "Net sales from combos. Each row's Total column is combo "
@@ -715,23 +674,60 @@ builds = detail_df[
 ].copy()
 if not builds.empty:
     builds["build"] = builds["product_name"].map(clean_product_name)
-    if selected_combo == "All combos":
-        builds["build"] = (
-            builds["product_class"] + " · " + builds["build"]
-        )
-    build_summary = (
-        builds.groupby("build", as_index=False)
+    build_summary = share_frame(
+        builds.groupby(["product_class", "build"], as_index=False)
         .agg(
             net_sales=("net_sales", "sum"),
             items=("n_items", "sum"),
         )
-        .sort_values("net_sales", ascending=False)
+    )
+    build_order = (
+        build_summary.groupby("build")["net_sales"]
+        .sum()
+        .sort_values(ascending=False)
+        .index
+        .tolist()
+    )
+    build_chart = (
+        alt.Chart(build_summary)
+        .mark_bar()
+        .encode(
+            y=alt.Y(
+                "build:N",
+                title=None,
+                sort=build_order,
+            ),
+            yOffset=alt.YOffset(
+                "product_class:N",
+                sort=combo_names,
+            ),
+            x=alt.X(
+                "mix:Q",
+                title="Share of combo net sales",
+                axis=alt.Axis(format=".0%"),
+            ),
+            color=alt.Color(
+                "product_class:N",
+                title="Combo",
+                sort=combo_names,
+                scale=alt.Scale(scheme="category20"),
+            ),
+            tooltip=[
+                alt.Tooltip("build:N", title="Build"),
+                alt.Tooltip("product_class:N", title="Combo"),
+                alt.Tooltip(
+                    "net_sales:Q",
+                    title="Net sales",
+                    format="$,.2f",
+                ),
+                alt.Tooltip("mix:Q", title="Mix", format=".1%"),
+                alt.Tooltip("items:Q", title="Items", format=",.0f"),
+            ],
+        )
+        .properties(height=max(40 * len(build_order), 160))
     )
     st.subheader("Meal build mix")
-    st.altair_chart(
-        ranked_share_chart(build_summary, "build", "Build"),
-        use_container_width=True,
-    )
+    st.altair_chart(build_chart, use_container_width=True)
     st.caption(
         "Regular, spicy, and other builds. Share uses net sales "
         "on the meal row, not the drink and side rows."

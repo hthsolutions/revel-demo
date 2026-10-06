@@ -728,9 +728,13 @@ percent_axis = alt.Axis(
     format=".1f",
     labelExpr="datum.value + '%'",
 )
-labor_share_bars = (
+labor_share_line = (
     alt.Chart(share_hours)
-    .mark_bar(color="#1f77b4", opacity=0.75)
+    .mark_line(
+        color="#1f77b4",
+        strokeWidth=2.5,
+        point=alt.OverlayMarkDef(size=55, color="#1f77b4"),
+    )
     .encode(
         x=hour_axis(),
         y=alt.Y(
@@ -759,7 +763,7 @@ share_sales_line = (
     )
 )
 share_chart = (
-    alt.layer(labor_share_bars, share_sales_line)
+    alt.layer(labor_share_line, share_sales_line)
     .resolve_scale(y="shared")
     .properties(height=360)
 )
@@ -767,9 +771,9 @@ share_chart = (
 st.subheader("% of Labor Hours and % of Sales")
 st.altair_chart(share_chart, use_container_width=True)
 st.caption(
-    "Bars are each hour's labor hours as a percent of "
-    "total labor hours. The line is that hour's sales as "
-    "a percent of total sales, on the same scale."
+    "The blue line is each hour's labor hours as a "
+    "percent of total labor hours. The orange line is "
+    "that hour's sales as a percent of total sales."
 )
 
 table_df = active_hours.sort_values("hour_index")[

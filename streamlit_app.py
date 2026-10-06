@@ -30,6 +30,11 @@ navigation = st.navigation(
             title="SpLH per Hour",
             icon="💵",
         ),
+        st.Page(
+            "views/combo_mix.py",
+            title="Combo Mix",
+            icon="🍗",
+        ),
     ]
 )
 

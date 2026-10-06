@@ -18,6 +18,7 @@ SHIFT_TABLE = "daily_employee_shift_timeworked_summary"
 SALARY_TABLE = "daily_salary"
 HOURLY_SALES_TABLE = "revel_hourly_sales"
 SHIFT_SUMMARY_TABLE = SHIFT_TABLE
+COMBO_MIX_TABLE = "revel_combo_mix"
 
 # PostgREST returns at most 1,000 rows per request.
 PAGE_SIZE = 1000
@@ -817,3 +818,153 @@ def location_filter_controls(
     return selected_location, dataframe[
         dataframe["location"] == selected_location
     ].copy()
+
+
+COMBO_MIX_COLUMNS = [
+    "business_date",
+    "location",
+    "product_class",
+    "product_category",
+    "product_subcategory",
+    "product_name",
+    "n_items",
+    "n_voids",
+    "total",
+    "discount",
+    "order_discount",
+]
+
+COMBO_MIX_NUMERIC_COLUMNS = [
+    "n_items",
+    "n_voids",
+    "total",
+    "discount",
+    "order_discount",
+]
+
+COMBO_MIX_TEXT_COLUMNS = [
+    "product_class",
+    "product_category",
+    "product_subcategory",
+    "product_name",
+]
+
+
+@st.cache_data(ttl=300)
+def load_combo_mix() -> pd.DataFrame:
+    """Retrieve combo component rows from Supabase.
+
+    Each row is one item sold inside a combo. The source
+    `total` column is combo net sales, so summing it is the
+    combo net sales for that selection.
+    """
+
+    available = get_table_columns(COMBO_MIX_TABLE)
+    selected = [
+        column_name
+        for column_name in (
+            _pick_column(available, [candidate])
+            for candidate in COMBO_MIX_COLUMNS
+        )
+        if column_name is not None
+    ]
+    order_column = _pick_column(
+        available,
+        ["business_date", "id"],
+    )
+
+    if not selected or order_column is None:
+        return pd.DataFrame(
+            columns=[
+                *COMBO_MIX_COLUMNS,
+                "net_sales",
+                "discounts",
+                "location_key",
+            ]
+        )
+
+    dataframe = fetch_table(
+        COMBO_MIX_TABLE,
+        selected,
+        order_column,
+    )
+
+    if dataframe.empty:
+        return dataframe
+
+    rename = {}
+    for candidate in COMBO_MIX_COLUMNS:
+        actual = _pick_column(list(dataframe.columns), [candidate])
+        if actual is not None and actual != candidate:
+            rename[actual] = candidate
+    if rename:
+        dataframe = dataframe.rename(columns=rename)
+
+    missing = [
+        column_name
+        for column_name in (
+            "business_date",
+            "location",
+            "product_class",
+            "product_name",
+            "total",
+        )
+        if column_name not in dataframe.columns
+    ]
+    if missing:
+        found = ", ".join(available) or "none"
+        raise ValueError(
+            f"{COMBO_MIX_TABLE} is missing "
+            + ", ".join(missing)
+            + f". Columns on the table: {found}."
+        )
+
+    dataframe["business_date"] = (
+        pd.to_datetime(
+            dataframe["business_date"],
+            errors="coerce",
+            utc=True,
+        )
+        .dt.tz_localize(None)
+        .dt.normalize()
+    )
+
+    dataframe = _coerce_numeric(
+        dataframe,
+        COMBO_MIX_NUMERIC_COLUMNS,
+    )
+    dataframe[COMBO_MIX_NUMERIC_COLUMNS] = (
+        dataframe[COMBO_MIX_NUMERIC_COLUMNS].fillna(0.0)
+    )
+
+    for column_name in COMBO_MIX_TEXT_COLUMNS:
+        if column_name not in dataframe.columns:
+            dataframe[column_name] = "Unassigned"
+        dataframe[column_name] = (
+            dataframe[column_name]
+            .fillna("Unassigned")
+            .astype(str)
+            .str.strip()
+            .replace("", "Unassigned")
+        )
+
+    dataframe = _add_location_key(dataframe)
+    dataframe = dataframe.dropna(subset=["business_date"])
+    dataframe["net_sales"] = dataframe["total"]
+    dataframe["discounts"] = (
+        dataframe["discount"] + dataframe["order_discount"]
+    )
+
+    grain = [
+        "location_key",
+        "business_date",
+        "product_class",
+        "product_category",
+        "product_subcategory",
+        "product_name",
+    ]
+    dataframe = dataframe.drop_duplicates(subset=grain, keep="last")
+
+    return dataframe.sort_values(
+        ["business_date", "location", "product_class", "product_name"]
+    )

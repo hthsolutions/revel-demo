@@ -146,6 +146,22 @@ def percent_of_sales(labor_dollars, net_sales) -> float:
     return labor_dollars / net_sales * 100
 
 
+def salaried_role_keys(salary_frame: pd.DataFrame) -> set[str]:
+    """Role names paid from the salary feed, not hourly shifts."""
+
+    keys = {role.strip().upper() for role in SALARY_ROLE_COLUMNS}
+    if not salary_frame.empty and "role" in salary_frame.columns:
+        keys.update(
+            salary_frame["role"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+    keys.discard("")
+    return keys
+
+
 def safe_ratio(
     numerator: pd.Series,
     denominator: pd.Series,
@@ -227,6 +243,7 @@ if shift_df.empty:
             "ot_wages",
             "shift_count",
             "employee_count",
+            "hourly_labor_hours",
         ]
     )
 else:
@@ -247,6 +264,39 @@ else:
             employee_count=("employee", "nunique"),
         )
     )
+    role_key = (
+        shift_df["role"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+    hourly_only = shift_df.loc[
+        ~role_key.isin(salaried_role_keys(salary_df))
+    ].copy()
+    if hourly_only.empty:
+        daily_hourly_df["hourly_labor_hours"] = 0.0
+    else:
+        hourly_only["hourly_labor_hours"] = (
+            hourly_only["regular_hours"].fillna(0)
+            + hourly_only["ot_hours"].fillna(0)
+        )
+        hourly_hours = (
+            hourly_only
+            .groupby(
+                ["business_date", "location_key"],
+                as_index=False,
+            )["hourly_labor_hours"]
+            .sum()
+        )
+        daily_hourly_df = daily_hourly_df.merge(
+            hourly_hours,
+            on=["business_date", "location_key"],
+            how="left",
+        )
+        daily_hourly_df["hourly_labor_hours"] = (
+            daily_hourly_df["hourly_labor_hours"].fillna(0.0)
+        )
 
 salary_wage_columns = [
     "gm_wages",
@@ -447,8 +497,8 @@ labor_df["ot_labor"] = labor_df["ot_wages"]
 labor_df["total_labor"] = (
     labor_df["hourly_labor"] + labor_df["salary_labor"]
 )
-labor_df["labor_hours"] = (
-    labor_df["regular_hours"] + labor_df["ot_hours"]
+labor_df["labor_hours"] = labor_df["hourly_labor_hours"].fillna(
+    0.0
 )
 
 labor_df["labor_percent"] = (
@@ -770,6 +820,10 @@ summary_columns[3].metric(
             )
         )
         else None
+    ),
+    help=(
+        "Net sales divided by hourly shift hours. "
+        "GM, DM, and other salaried roles are excluded."
     ),
 )
 
@@ -1803,7 +1857,7 @@ with st.expander("View weekly labor breakdown"):
                 )
             ),
             "labor_hours": st.column_config.NumberColumn(
-                "Labor Hours",
+                "Hourly Hours",
                 format="%.1f",
             ),
             "sales_per_labor_hour": (
@@ -1876,7 +1930,7 @@ with st.expander("View daily labor records"):
                 format="%.2f%%",
             ),
             "labor_hours": st.column_config.NumberColumn(
-                "Hours",
+                "Hourly Hours",
                 format="%.1f",
             ),
             "ot_hours": st.column_config.NumberColumn(

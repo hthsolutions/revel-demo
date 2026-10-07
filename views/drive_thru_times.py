@@ -142,30 +142,37 @@ def heatmap_label_color(minutes, top: float) -> str:
     return "#ffffff" if luminance < 0.30 else "#1a1a1a"
 
 
+def splh_range_text(start: int) -> str:
+    """Format one $10 range as currency, such as $10.00-$19.99."""
+
+    return f"${start:,.2f}-${start + 9.99:,.2f}"
+
+
 def splh_range_label(value) -> str | None:
     """Bucket a sales-per-labor-hour rate into a $10 range.
 
-    0 through 9.99 is "0-9". 10 through 19.99 is "10-19".
+    0 through 9.99 is "$0.00-$9.99". 10 through 19.99 is "$10.00-$19.99".
     """
 
     if value is None or pd.isna(value) or float(value) < 0:
         return None
     start = int(float(value) // 10) * 10
-    return f"{start}-{start + 9}"
+    return splh_range_text(start)
 
 
 def splh_range_order(labels: list[str]) -> list[str]:
-    """Ranges from 0-9 through the highest range that has data."""
+    """Ranges from $0.00-$9.99 through the highest range with data."""
 
     starts = []
     for label in labels:
         if label is None or pd.isna(label):
             continue
-        starts.append(int(str(label).split("-")[0]))
+        low = str(label).split("-")[0].replace("$", "").replace(",", "")
+        starts.append(int(float(low)))
     if not starts:
         return []
     return [
-        f"{start}-{start + 9}"
+        splh_range_text(start)
         for start in range(0, max(starts) + 1, 10)
     ]
 
@@ -1524,7 +1531,7 @@ else:
     st.altair_chart(
         alt.hconcat(
             alt.layer(range_rects, range_labels).properties(
-                width=alt.Step(72),
+                width=alt.Step(128),
                 height=alt.Step(46),
             ),
             range_scale,

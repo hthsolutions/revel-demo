@@ -459,6 +459,180 @@ def sales_by_hour(sales_df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     return grouped, skipped
 
 
+def allocate_shift_quarters(clock_in, clock_out):
+    """Split a shift into business-date and 15-minute pieces.
+
+    Hours before 6:00 AM belong to the previous business
+    date, matching the sales intervals.
+    """
+
+    if clock_in is None or pd.isna(clock_in):
+        return []
+    if clock_out is None or pd.isna(clock_out) or clock_out <= clock_in:
+        return []
+
+    pieces = []
+    cursor = pd.Timestamp(clock_in)
+    stop_at = pd.Timestamp(clock_out)
+
+    while cursor < stop_at:
+        quarter_minute = (int(cursor.minute) // 15) * 15
+        quarter_floor = cursor.replace(
+            minute=quarter_minute,
+            second=0,
+            microsecond=0,
+        )
+        quarter_end = quarter_floor + pd.Timedelta(minutes=15)
+        piece_end = min(stop_at, quarter_end)
+        worked = (piece_end - cursor).total_seconds() / 3600
+        clock_hour = int(quarter_floor.hour)
+        if clock_hour < BUSINESS_DAY_START_HOUR:
+            business_date = (
+                quarter_floor.normalize() - pd.Timedelta(days=1)
+            )
+        else:
+            business_date = quarter_floor.normalize()
+        if worked > 0:
+            pieces.append(
+                (business_date, clock_hour, quarter_minute, worked)
+            )
+        cursor = piece_end
+
+    return pieces
+
+
+def labor_hours_by_quarter(shift_df: pd.DataFrame) -> pd.DataFrame:
+    """Place each shift onto the 15-minute intervals it overlaps."""
+
+    empty = pd.DataFrame(
+        columns=[
+            "location_key",
+            "business_date",
+            "hour",
+            "quarter_minute",
+            "labor_hours",
+        ]
+    )
+    if shift_df.empty:
+        return empty
+
+    records = []
+    for shift in shift_df.itertuples(index=False):
+        clock_in, clock_out = resolve_shift_span(
+            shift.shift_date,
+            shift.clock_in,
+            shift.clock_out,
+            shift.hours,
+        )
+        for business_date, hour, quarter_minute, worked in (
+            allocate_shift_quarters(clock_in, clock_out)
+        ):
+            records.append(
+                {
+                    "location_key": shift.location_key,
+                    "business_date": business_date,
+                    "hour": hour,
+                    "quarter_minute": quarter_minute,
+                    "labor_hours": worked,
+                }
+            )
+
+    if not records:
+        return empty
+
+    placed = pd.DataFrame(records)
+    placed["business_date"] = pd.to_datetime(
+        placed["business_date"]
+    ).dt.normalize()
+    return (
+        placed
+        .groupby(
+            ["location_key", "business_date", "hour", "quarter_minute"],
+            as_index=False,
+        )["labor_hours"]
+        .sum()
+    )
+
+
+def sales_by_quarter(sales_df: pd.DataFrame) -> pd.DataFrame:
+    """Keep sales in the 15-minute interval where they were rung."""
+
+    empty = pd.DataFrame(
+        columns=[
+            "location_key",
+            "business_date",
+            "hour",
+            "quarter_minute",
+            "sales",
+            "transactions",
+        ]
+    )
+    if sales_df.empty or "time" not in sales_df.columns:
+        return empty
+
+    working = sales_df.copy()
+    starts = working["time"].map(interval_start_parts)
+    working["hour"] = starts.map(lambda parts: parts[0])
+    working["quarter_minute"] = starts.map(lambda parts: parts[1])
+    if "interval_label" in working.columns and working["hour"].isna().any():
+        fallback = working["interval_label"].map(interval_start_parts)
+        missing = working["hour"].isna()
+        working.loc[missing, "hour"] = fallback[missing].map(
+            lambda parts: parts[0]
+        )
+        working.loc[missing, "quarter_minute"] = fallback[missing].map(
+            lambda parts: parts[1]
+        )
+    working = working.dropna(subset=["hour", "quarter_minute"])
+    if working.empty:
+        return empty
+
+    working["hour"] = working["hour"].astype(int)
+    working["quarter_minute"] = (
+        (working["quarter_minute"].astype(int) // 15) * 15
+    )
+    working["business_date"] = pd.to_datetime(
+        working["business_date"]
+    ).dt.normalize()
+    if "transactions" not in working.columns:
+        working["transactions"] = 0.0
+
+    return (
+        working
+        .groupby(
+            ["location_key", "business_date", "hour", "quarter_minute"],
+            as_index=False,
+        )
+        .agg(
+            sales=("sales", "sum"),
+            transactions=("transactions", "sum"),
+        )
+    )
+
+
+def quarter_label(hour, minute) -> str:
+    """Label a 15-minute window, such as 10:00–10:15 AM."""
+
+    hour = int(hour) % 24
+    minute = int(minute)
+    start_suffix = "AM" if hour < 12 else "PM"
+    start_display = hour % 12 or 12
+    end_total = hour * 60 + minute + 15
+    end_hour = (end_total // 60) % 24
+    end_minute = end_total % 60
+    end_suffix = "AM" if end_hour < 12 else "PM"
+    end_display = end_hour % 12 or 12
+    if start_suffix == end_suffix:
+        return (
+            f"{start_display}:{minute:02d}–"
+            f"{end_display}:{end_minute:02d} {start_suffix}"
+        )
+    return (
+        f"{start_display}:{minute:02d} {start_suffix}–"
+        f"{end_display}:{end_minute:02d} {end_suffix}"
+    )
+
+
 def period_rates(frame: pd.DataFrame) -> dict:
     """One car-weighted average for a set of departures."""
 
@@ -1059,8 +1233,31 @@ else:
     )
     by_hour = with_hour_fields(by_hour)
 
-    scatter_rates = hourly_slice.copy()
-    if not scatter_rates.empty:
+    scatter_sales = sales_by_quarter(sales_df)
+    scatter_labor = labor_hours_by_quarter(shift_df)
+    if scatter_sales.empty and scatter_labor.empty:
+        scatter_rates = pd.DataFrame()
+    else:
+        scatter_rates = scatter_sales.merge(
+            scatter_labor,
+            on=[
+                "location_key",
+                "business_date",
+                "hour",
+                "quarter_minute",
+            ],
+            how="outer",
+        )
+        scatter_rates["sales"] = scatter_rates["sales"].fillna(0.0)
+        scatter_rates["labor_hours"] = (
+            scatter_rates["labor_hours"].fillna(0.0)
+        )
+        scatter_rates["business_date"] = pd.to_datetime(
+            scatter_rates["business_date"]
+        ).dt.normalize()
+        scatter_rates = scatter_rates[
+            scatter_rates["business_date"].isin(slice_dates)
+        ]
         scatter_rates["splh"] = (
             scatter_rates["sales"]
             / scatter_rates["labor_hours"].where(
@@ -1068,25 +1265,38 @@ else:
             )
         )
         scatter_rates = scatter_rates.dropna(subset=["splh"])
-        scatter_rates["business_date"] = pd.to_datetime(
-            scatter_rates["business_date"]
-        ).dt.normalize()
-        scatter_rates["hour"] = scatter_rates["hour"].astype(int)
-    hourly_times = rollup_drive_thru_times(
-        slice_df,
-        ["location_key", "business_date", "hour"],
+
+    quarter_cars = slice_df.dropna(subset=["departure_time"]).copy()
+    if not quarter_cars.empty:
+        quarter_cars["quarter_minute"] = (
+            quarter_cars["departure_time"].dt.minute // 15 * 15
+        ).astype(int)
+    quarter_times = rollup_drive_thru_times(
+        quarter_cars,
+        ["location_key", "business_date", "hour", "quarter_minute"],
     )
-    if hourly_times.empty or scatter_rates.empty:
+    if quarter_times.empty or scatter_rates.empty:
         scatter_points = pd.DataFrame()
     else:
-        hourly_times["business_date"] = pd.to_datetime(
-            hourly_times["business_date"]
+        quarter_times["business_date"] = pd.to_datetime(
+            quarter_times["business_date"]
         ).dt.normalize()
-        scatter_points = hourly_times.merge(
+        scatter_points = quarter_times.merge(
             scatter_rates[
-                ["location_key", "business_date", "hour", "splh"]
+                [
+                    "location_key",
+                    "business_date",
+                    "hour",
+                    "quarter_minute",
+                    "splh",
+                ]
             ],
-            on=["location_key", "business_date", "hour"],
+            on=[
+                "location_key",
+                "business_date",
+                "hour",
+                "quarter_minute",
+            ],
             how="inner",
         )
         scatter_points = scatter_points.dropna(
@@ -1095,7 +1305,7 @@ else:
     if scatter_points.empty:
         st.info(
             "The scatter plot needs a lane total and a "
-            "sales-per-labor-hour rate in the same hour."
+            "sales-per-labor-hour rate in the same 15 minutes."
         )
     else:
         scatter_points = with_hour_fields(scatter_points)
@@ -1106,6 +1316,13 @@ else:
         scatter_points["splh_label"] = scatter_points["splh"].map(
             lambda value: f"${value:,.2f}"
         )
+        scatter_points["interval_label"] = [
+            quarter_label(hour, minute)
+            for hour, minute in zip(
+                scatter_points["hour"],
+                scatter_points["quarter_minute"],
+            )
+        ]
         scatter_points["day_label"] = scatter_points[
             "business_date"
         ].map(format_day)
@@ -1138,7 +1355,7 @@ else:
                 y=y_axis,
                 tooltip=[
                     alt.Tooltip("day_label:N", title="Day"),
-                    alt.Tooltip("hour_label:N", title="Hour"),
+                    alt.Tooltip("interval_label:N", title="Interval"),
                     alt.Tooltip(
                         "lane_total_label:N",
                         title="Lane total",
@@ -1180,10 +1397,10 @@ else:
             use_container_width=True,
         )
         st.caption(
-            "Each point is one hour. The lane total is the "
-            "average for cars that left during that hour, plotted "
-            "against that hour's sales per labor hour. The line "
-            "is the 4:00 target."
+            "Each point is one 15-minute interval. The lane "
+            "total is the average for cars that left during that "
+            "interval, plotted against sales per labor hour for "
+            "the same 15 minutes. The line is the 4:00 target."
         )
 
     table = by_hour.sort_values("hour_index").copy()

@@ -31,6 +31,11 @@ navigation = st.navigation(
             icon="💵",
         ),
         st.Page(
+            "views/drive_thru_times.py",
+            title="Drive-Thru Times",
+            icon="🚗",
+        ),
+        st.Page(
             "views/combo_mix.py",
             title="Combo Mix",
             icon="🍗",

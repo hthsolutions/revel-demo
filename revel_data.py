@@ -6,6 +6,8 @@ cleaning, and week definitions stay consistent.
 
 import pandas as pd
 import streamlit as st
+from zoneinfo import ZoneInfo
+
 from supabase import Client, create_client
 
 
@@ -19,6 +21,13 @@ SALARY_TABLE = "daily_salary"
 HOURLY_SALES_TABLE = "revel_hourly_sales"
 SHIFT_SUMMARY_TABLE = SHIFT_TABLE
 COMBO_MIX_TABLE = "daily-product-mix-combomix"
+HME_TABLE = "daily-hme-rcd-summary"
+
+# HME departure timestamps are store-local. A visit before
+# 6:00 AM belongs to the previous business date, matching
+# the hourly sales extract.
+STORE_TIMEZONE = ZoneInfo("America/Chicago")
+BUSINESS_DAY_START_HOUR = 6
 
 # PostgREST returns at most 1,000 rows per request.
 PAGE_SIZE = 1000
@@ -482,6 +491,216 @@ def load_hourly_sales() -> pd.DataFrame:
 
     return dataframe.sort_values(
         ["business_date", "location", "time"]
+    )
+
+
+# Canonical names for the HME car-departure feed. The source
+# table uses the export's mixed-case headers.
+HME_FIELDS = {
+    "location": ["StoreLocation", "location", "store"],
+    "departure_time": ["Departure_Time", "departure_time"],
+    "event_name": ["Event_Name", "event_name", "event"],
+    "total_cars": ["Total_Cars", "total_cars"],
+    "menu_board": ["Menu_Board", "menu_board"],
+    "greet": ["Greet", "greet"],
+    "service": ["Service", "service"],
+    "lane_queue": ["Lane_Queue", "lane_queue"],
+    "lane_total": ["Lane_Total", "lane_total"],
+}
+
+DRIVE_THRU_TIME_COLUMNS = [
+    "menu_board",
+    "greet",
+    "service",
+    "lane_queue",
+    "lane_total",
+]
+
+
+def _pick_hme_column(
+    columns: list[str],
+    candidates: list[str],
+) -> str | None:
+    """Match an HME column, ignoring case and underscores."""
+
+    found = _pick_column(columns, candidates)
+    if found is not None:
+        return found
+
+    def squash(name: str) -> str:
+        return (
+            name.strip().lower().replace(" ", "").replace("_", "")
+        )
+
+    lookup = {squash(name): name for name in columns}
+    for candidate in candidates:
+        match = lookup.get(squash(candidate))
+        if match is not None:
+            return match
+    return None
+
+
+def _parse_store_timestamps(series: pd.Series) -> pd.Series:
+    """Parse departure timestamps into naive Central Time.
+
+    Values without a timezone are already store-local clock
+    times. Converting those as UTC would shift the hour.
+    """
+
+    parsed = pd.to_datetime(series, errors="coerce")
+    if isinstance(parsed.dtype, pd.DatetimeTZDtype):
+        parsed = (
+            parsed.dt.tz_convert(STORE_TIMEZONE).dt.tz_localize(None)
+        )
+    return parsed
+
+
+def assign_business_clock(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Add the business date and clock hour for each departure.
+
+    Hours before 6:00 AM belong to the previous business
+    date, matching hourly sales and labor placement.
+    """
+
+    dataframe = dataframe.copy()
+    stamps = dataframe["departure_time"]
+    hours = stamps.dt.hour
+    dates = stamps.dt.normalize()
+    early = hours < BUSINESS_DAY_START_HOUR
+    # Nullable so a blank timestamp does not crash the cast.
+    dataframe["hour"] = hours.astype("Int64")
+    dataframe["business_date"] = dates.where(
+        ~early.fillna(False),
+        dates - pd.Timedelta(days=1),
+    )
+    return dataframe
+
+
+def rollup_drive_thru_times(
+    frame: pd.DataFrame,
+    group_columns: list[str],
+) -> pd.DataFrame:
+    """Car-weighted average of each lane time, in seconds.
+
+    Each departure counts once. Averaging daily rates first
+    would let a slow, quiet day count the same as a busy one.
+    """
+
+    value_columns = [
+        "cars",
+        *DRIVE_THRU_TIME_COLUMNS,
+        "avg_cars_in_lane",
+    ]
+    if frame.empty:
+        return pd.DataFrame(columns=[*group_columns, *value_columns])
+
+    working = frame.copy()
+    working["_car"] = 1
+    aggregations = {
+        "cars": ("_car", "sum"),
+        "cars_in_lane_sum": ("total_cars", "sum"),
+        "cars_in_lane_n": ("total_cars", "count"),
+    }
+    for column_name in DRIVE_THRU_TIME_COLUMNS:
+        aggregations[f"{column_name}_sum"] = (column_name, "sum")
+        aggregations[f"{column_name}_n"] = (column_name, "count")
+
+    grouped = working.groupby(group_columns, as_index=False).agg(
+        **aggregations
+    )
+    for column_name in DRIVE_THRU_TIME_COLUMNS:
+        counted = grouped[f"{column_name}_n"].replace(0, pd.NA)
+        grouped[column_name] = (
+            grouped[f"{column_name}_sum"] / counted
+        )
+        grouped = grouped.drop(
+            columns=[f"{column_name}_sum", f"{column_name}_n"]
+        )
+
+    grouped["avg_cars_in_lane"] = (
+        grouped["cars_in_lane_sum"]
+        / grouped["cars_in_lane_n"].replace(0, pd.NA)
+    )
+    grouped = grouped.drop(
+        columns=["cars_in_lane_sum", "cars_in_lane_n"]
+    )
+    return grouped
+
+
+@st.cache_data(ttl=300)
+def load_hme_departures() -> pd.DataFrame:
+    """Retrieve HME drive-thru car departures from Supabase.
+
+    One row is one car leaving the lane. Time columns are
+    seconds. total_cars is how many cars were still stacked
+    behind that departure, not a daily car count.
+    """
+
+    available = get_table_columns(HME_TABLE)
+    selected: list[str] = []
+    rename: dict[str, str] = {}
+    for canonical, candidates in HME_FIELDS.items():
+        actual = _pick_hme_column(available, candidates)
+        if actual is None or actual in selected:
+            continue
+        selected.append(actual)
+        rename[actual] = canonical
+
+    required = {"location", "departure_time", "lane_total"}
+    missing = sorted(required - set(rename.values()))
+    if missing or not selected:
+        found = ", ".join(available) or "none"
+        raise ValueError(
+            f"{HME_TABLE} is missing "
+            + ", ".join(missing or ["departure_time"])
+            + f". Columns on the table: {found}."
+        )
+
+    order_column = _pick_hme_column(
+        available,
+        HME_FIELDS["departure_time"],
+    )
+    dataframe = fetch_table(HME_TABLE, selected, order_column)
+    if dataframe.empty:
+        return dataframe
+
+    dataframe = dataframe.rename(columns=rename)
+    for column_name in ("event_name", "total_cars", *DRIVE_THRU_TIME_COLUMNS):
+        if column_name not in dataframe.columns:
+            dataframe[column_name] = pd.NA
+
+    dataframe["departure_time"] = _parse_store_timestamps(
+        dataframe["departure_time"]
+    )
+    dataframe = _coerce_numeric(
+        dataframe,
+        ["total_cars", *DRIVE_THRU_TIME_COLUMNS],
+    )
+    dataframe = dataframe.dropna(
+        subset=["departure_time", "lane_total"]
+    )
+
+    if "event_name" in dataframe.columns:
+        event_name = (
+            dataframe["event_name"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .str.replace(" ", "_", regex=False)
+        )
+        departures = dataframe[event_name == "car_departure"]
+        if not departures.empty:
+            dataframe = departures.copy()
+
+    dataframe = _add_location_key(dataframe)
+    dataframe = assign_business_clock(dataframe)
+    dataframe = dataframe.drop_duplicates(
+        subset=["location_key", "departure_time"],
+        keep="last",
+    )
+    return dataframe.sort_values(
+        ["departure_time", "location"]
     )
 
 

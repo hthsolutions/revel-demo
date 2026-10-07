@@ -27,10 +27,25 @@ from revel_data import (
 
 STORE_TIMEZONE = ZoneInfo("America/Chicago")
 
+# Menu board, service, and lane queue add up to the lane
+# total on this feed. Greet is already inside menu board.
+PART_COLUMNS = ["menu_board", "service", "lane_queue"]
+PART_LABELS = {
+    "menu_board": "Menu board",
+    "service": "Service",
+    "lane_queue": "Lane queue",
+    "lane_total": "Lane total",
+}
+PART_ORDER = ["Menu board", "Service", "Lane queue", "Lane total"]
+PART_COLORS = {
+    "Menu board": "#1f77b4",
+    "Service": "#17becf",
+    "Lane queue": "#9467bd",
+    "Lane total": "#1f77b4",
+}
+
 # Lane time at or under this stays green. Longer times are red.
-# SpLH turns green at the same $70 break as the SpLH page.
 GOAL_MINUTES = 4.0
-GREEN_SPLH = 70.0
 HEATMAP_RED = ((103, 0, 13), (239, 59, 44))
 HEATMAP_GREEN = ((102, 189, 99), (0, 68, 27))
 
@@ -108,62 +123,23 @@ def heatmap_fill(minutes, top: float):
     )
 
 
-def fill_hex(fill) -> str | None:
+def heatmap_color_hex(minutes, top: float):
+    fill = heatmap_fill(minutes, top)
     if fill is None:
         return None
     return "#{:02x}{:02x}{:02x}".format(*fill)
 
 
-def label_color_from_fill(fill) -> str:
-    """Use white type on dark tiles and dark type on light ones."""
+def heatmap_label_color(minutes, top: float) -> str:
+    """Use white type on dark red and dark green cells."""
 
+    fill = heatmap_fill(minutes, top)
     if fill is None:
         return "#1a1a1a"
     red, green, blue = (_srgb_channel(part) for part in fill)
     luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+    # Tiles near 4:00 are light green, so they need dark type.
     return "#ffffff" if luminance < 0.30 else "#1a1a1a"
-
-
-def heatmap_color_hex(minutes, top: float):
-    return fill_hex(heatmap_fill(minutes, top))
-
-
-def heatmap_label_color(minutes, top: float) -> str:
-    """Use white type on dark red and dark green cells."""
-
-    return label_color_from_fill(heatmap_fill(minutes, top))
-
-
-def splh_scale_top(rate_max: float) -> float:
-    """Keep the $70 break on the SpLH scale."""
-
-    if pd.isna(rate_max) or rate_max <= 0:
-        return GREEN_SPLH + 0.01
-    return max(float(rate_max), GREEN_SPLH + 0.01)
-
-
-def splh_heatmap_fill(value, top: float):
-    """Red under $70, and green from $70 upward.
-
-    Darker green is a higher sales-per-labor-hour rate.
-    Darker red is a lower one.
-    """
-
-    if value is None or pd.isna(value):
-        return None
-    amount = float(value)
-    if amount >= GREEN_SPLH:
-        span = max(float(top) - GREEN_SPLH, 0.01)
-        return _mix_color(
-            HEATMAP_GREEN[0],
-            HEATMAP_GREEN[1],
-            (amount - GREEN_SPLH) / span,
-        )
-    return _mix_color(
-        HEATMAP_RED[0],
-        HEATMAP_RED[1],
-        amount / GREEN_SPLH,
-    )
 
 
 def format_seconds_delta(current, previous):
@@ -174,6 +150,22 @@ def format_seconds_delta(current, previous):
     if pd.isna(current) or pd.isna(previous):
         return None
     return f"{float(current) - float(previous):+.0f} sec"
+
+
+def parts_add_up(frame: pd.DataFrame) -> bool:
+    """True when menu, service, and queue reconstruct the lane total."""
+
+    if frame.empty:
+        return False
+    residual = (
+        frame["lane_total"]
+        - frame["menu_board"].fillna(0)
+        - frame["service"].fillna(0)
+        - frame["lane_queue"].fillna(0)
+    ).abs()
+    if residual.empty:
+        return False
+    return bool(residual.median() <= 2)
 
 
 def preferred_location(names: pd.Series) -> str:
@@ -503,114 +495,59 @@ def add_duration_labels(frame: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
-def metric_heatmap(
-    cells: pd.DataFrame,
-    value_column: str,
-    text_column: str,
-    row_order: list[str],
-    hour_order: list[str],
-    scale_top: float,
-    fill_for_value,
-    legend_title: str,
-    legend_ticks: list[float],
-    legend_format: str,
-    tooltip: list,
-) -> alt.Chart:
-    """Day-by-hour tiles that share one hour axis and a legend."""
+def melt_times(
+    frame: pd.DataFrame,
+    id_columns: list[str],
+    stack_parts: bool,
+) -> pd.DataFrame:
+    """One row per time band, in minutes, for a stacked bar."""
 
-    plotted = cells.copy()
-    fills = plotted[value_column].map(
-        lambda value: fill_for_value(value, scale_top)
+    value_columns = PART_COLUMNS if stack_parts else ["lane_total"]
+    long = frame.melt(
+        id_vars=id_columns,
+        value_vars=value_columns,
+        var_name="segment_key",
+        value_name="seconds",
     )
-    plotted["fill_color"] = fills.map(fill_hex)
-    plotted["label_color"] = fills.map(label_color_from_fill)
+    long["segment"] = long["segment_key"].map(PART_LABELS)
+    long["minutes"] = long["seconds"] / 60.0
+    long["segment_order"] = long["segment"].map(
+        {label: index for index, label in enumerate(PART_ORDER)}
+    )
+    return long.dropna(subset=["minutes"])
 
-    legend_steps = 80
-    legend_df = pd.DataFrame(
-        {
-            "mark": [
-                scale_top * step / legend_steps
-                for step in range(legend_steps + 1)
-            ]
-        }
-    )
-    legend_df["mark_end"] = legend_df["mark"].shift(-1)
-    legend_df = legend_df.dropna()
-    legend_df["fill_color"] = legend_df["mark"].map(
-        lambda value: fill_hex(fill_for_value(value, scale_top))
-    )
 
-    base = alt.Chart(plotted)
-    hour_axis = alt.X(
-        "hour_label:N",
-        title="Hour",
-        sort=hour_order,
-        scale=alt.Scale(domain=hour_order),
-        axis=alt.Axis(labelAngle=0),
-    )
-    day_axis = alt.Y(
-        "day_label:N",
-        title=None,
-        sort=row_order,
-    )
-    rects = (
-        base
-        .transform_filter(f"isValid(datum.{value_column})")
-        .mark_rect(stroke="white", strokeWidth=1)
-        .encode(
-            x=hour_axis,
-            y=day_axis,
-            color=alt.Color("fill_color:N", scale=None, legend=None),
-            tooltip=tooltip,
+def fill_hour_span(frame: pd.DataFrame) -> pd.DataFrame:
+    """Keep empty hours that sit between the first and last active hour."""
+
+    if frame.empty or frame["hour_index"].isna().all():
+        return frame
+    start = int(frame["hour_index"].min())
+    stop = int(frame["hour_index"].max())
+    present = set(frame["hour_index"].dropna().astype(int))
+    extras = []
+    for index in range(start, stop + 1):
+        if index in present:
+            continue
+        hour = (index + BUSINESS_DAY_START_HOUR) % 24
+        extras.append(
+            {
+                "hour": hour,
+                "hour_index": index,
+                "hour_label": hour_label(hour),
+            }
         )
-    )
-    labels = (
-        base
-        .transform_filter(f"isValid(datum.{value_column})")
-        .mark_text(fontSize=12, fontWeight="bold")
-        .encode(
-            x=alt.X(
-                "hour_label:N",
-                title="Hour",
-                sort=hour_order,
-                scale=alt.Scale(domain=hour_order),
-            ),
-            y=day_axis,
-            text=alt.Text(f"{text_column}:N"),
-            color=alt.Color(
-                "label_color:N",
-                scale=None,
-                legend=None,
-            ),
-        )
-    )
-    legend = (
-        alt.Chart(legend_df)
-        .mark_rect()
-        .encode(
-            y=alt.Y(
-                "mark:Q",
-                title=legend_title,
-                scale=alt.Scale(domain=[0, scale_top], nice=False),
-                axis=alt.Axis(
-                    format=legend_format,
-                    values=legend_ticks,
-                ),
-            ),
-            y2="mark_end:Q",
-            color=alt.Color("fill_color:N", scale=None, legend=None),
-        )
-        .properties(width=18, height=max(len(row_order), 1) * 46)
-    )
-    return (
-        alt.hconcat(
-            alt.layer(rects, labels).properties(
-                width=alt.Step(72),
-                height=alt.Step(46),
-            ),
-            legend,
-        )
-        .configure_view(strokeWidth=0, clip=False)
+    if not extras:
+        return frame
+    return pd.concat([frame, pd.DataFrame(extras)], ignore_index=True)
+
+
+def segment_scale(labels: list[str]) -> alt.Scale:
+    """Colors for the lane-time bands, in stack order."""
+
+    return alt.Scale(
+        domain=labels,
+        range=[PART_COLORS[label] for label in labels],
     )
 
 
@@ -730,8 +667,8 @@ weeks_to_display = st.sidebar.slider(
     value=8,
     help=(
         "Days on the drive-thru time heatmap, ending with "
-        "the selected week. The summary and the per-hour "
-        "heatmaps use the selected week only."
+        "the selected week. The summary and the hourly "
+        "chart use the selected week only."
     ),
 )
 
@@ -749,10 +686,18 @@ selected_day_label = st.sidebar.selectbox(
     "Day",
     options=["All days", *day_labels.values()],
     help=(
-        "Applies to the summary and the per-hour heatmaps. "
+        "Applies to the summary and the hourly chart. "
         "The history chart still shows every day."
     ),
 )
+
+stack_parts = parts_add_up(hme_df)
+segment_labels = (
+    ["Menu board", "Service", "Lane queue"]
+    if stack_parts
+    else ["Lane total"]
+)
+color_scale = segment_scale(segment_labels)
 
 history_start = pd.Timestamp(selected_week) - pd.Timedelta(
     days=7 * (weeks_to_display - 1)
@@ -1139,10 +1084,10 @@ else:
 
 
 # ---------------------------------------------------------
-# Drive-thru time and SpLH, one heatmap per hour
+# Drive-thru time vs sales per labor hour, by clock hour
 # ---------------------------------------------------------
 
-st.subheader("Drive-thru time and SpLH per hour")
+st.subheader("Drive-thru time and SpLH by hour")
 
 time_by_hour = rollup_drive_thru_times(slice_df, ["hour"])
 if not hourly_slice.empty:
@@ -1175,202 +1120,179 @@ else:
         how="outer",
     )
     by_hour = with_hour_fields(by_hour)
+    by_hour = fill_hour_span(by_hour)
+    by_hour = add_duration_labels(by_hour)
+    by_hour["splh_label"] = by_hour["splh"].map(
+        lambda value: "—"
+        if pd.isna(value)
+        else f"${value:,.2f}"
+    )
+    by_hour["sales_label"] = by_hour["sales"].map(
+        lambda value: "—"
+        if pd.isna(value)
+        else f"${value:,.2f}"
+    )
+    by_hour["labor_label"] = by_hour["labor_hours"].map(
+        lambda value: "—"
+        if pd.isna(value)
+        else f"{value:,.2f}"
+    )
+
     hour_order = (
         by_hour.sort_values("hour_index")
         .drop_duplicates("hour_label")["hour_label"]
         .tolist()
     )
-
-    time_cells = rollup_drive_thru_times(
-        slice_df,
-        ["business_date", "hour"],
+    hour_axis = alt.X(
+        "hour_label:N",
+        title="Hour",
+        sort=hour_order,
+        scale=alt.Scale(domain=hour_order),
+        axis=alt.Axis(labelAngle=0),
     )
-    if time_cells.empty:
+    hour_tooltip = [
+        alt.Tooltip("hour_label:N", title="Hour"),
+        alt.Tooltip("segment:N", title="Time"),
+        alt.Tooltip("minutes:Q", title="Minutes", format=".1f"),
+        alt.Tooltip("lane_total_label:N", title="Lane total"),
+        alt.Tooltip("menu_board_label:N", title="Menu board"),
+        alt.Tooltip("greet_label:N", title="Greet"),
+        alt.Tooltip("service_label:N", title="Service"),
+        alt.Tooltip("lane_queue_label:N", title="Lane queue"),
+        alt.Tooltip("cars:Q", title="Cars", format=",.0f"),
+        alt.Tooltip("splh_label:N", title="SpLH"),
+        alt.Tooltip("sales_label:N", title="Sales"),
+        alt.Tooltip("labor_label:N", title="Labor hours"),
+        alt.Tooltip(
+            "transactions:Q",
+            title="Transactions",
+            format=",.0f",
+        ),
+    ]
+
+    timed = by_hour[by_hour["cars"].fillna(0) > 0].copy()
+    if timed.empty:
         st.info("No cars left the lane in that selection.")
     else:
-        time_cells = with_hour_fields(time_cells)
-        time_cells = add_duration_labels(time_cells)
-        time_cells["minutes"] = time_cells["lane_total"] / 60.0
-        time_cells["day_label"] = time_cells["business_date"].map(
-            format_day
-        )
-        time_dates = sorted(time_cells["business_date"].unique())
-        time_row_order = [format_day(value) for value in time_dates]
-        if len(time_dates) > 1:
-            pooled_time = rollup_drive_thru_times(slice_df, ["hour"])
-            pooled_time = with_hour_fields(pooled_time)
-            pooled_time = add_duration_labels(pooled_time)
-            pooled_time["minutes"] = pooled_time["lane_total"] / 60.0
-            pooled_time["day_label"] = "Week"
-            time_cells = pd.concat(
-                [time_cells, pooled_time],
-                ignore_index=True,
-            )
-            time_row_order = [*time_row_order, "Week"]
-
-        time_top = heatmap_top(time_cells["minutes"].max(skipna=True))
-        time_ticks = [0, GOAL_MINUTES]
-        if time_top > GOAL_MINUTES + 0.05:
-            time_ticks.append(float(time_top))
-        time_caption = (
-            "Each cell is the average lane time for cars that "
-            "left during that hour. 4:00 and under is green, "
-            "and darker green is a faster lane. Above 4:00 is "
-            "red, and darker red is a slower lane."
-        )
-        if "Week" in time_row_order:
-            time_caption += (
-                " The Week row pools every car in this selection."
-            )
-        st.altair_chart(
-            metric_heatmap(
-                time_cells,
-                "minutes",
+        timed_long = melt_times(
+            timed,
+            [
+                "hour",
+                "hour_index",
+                "hour_label",
+                "cars",
                 "lane_total_label",
-                time_row_order,
-                hour_order,
-                time_top,
-                heatmap_fill,
-                "Minutes",
-                time_ticks,
-                ".1f",
-                [
-                    alt.Tooltip("day_label:N", title="Day"),
-                    alt.Tooltip("hour_label:N", title="Hour"),
-                    alt.Tooltip(
-                        "lane_total_label:N",
-                        title="Lane total",
-                    ),
-                    alt.Tooltip(
-                        "menu_board_label:N",
-                        title="Menu board",
-                    ),
-                    alt.Tooltip("greet_label:N", title="Greet"),
-                    alt.Tooltip("service_label:N", title="Service"),
-                    alt.Tooltip(
-                        "lane_queue_label:N",
-                        title="Lane queue",
-                    ),
-                    alt.Tooltip(
-                        "cars:Q",
-                        title="Cars",
-                        format=",.0f",
-                    ),
-                ],
-            ),
-            use_container_width=False,
-        )
-        st.caption(time_caption)
-
-    if hourly_slice.empty:
-        splh_cells = pd.DataFrame()
-    else:
-        splh_cells = (
-            hourly_slice
-            .groupby(["business_date", "hour"], as_index=False)
-            .agg(
-                sales=("sales", "sum"),
-                transactions=("transactions", "sum"),
-                labor_hours=("labor_hours", "sum"),
-            )
-        )
-        splh_cells["splh"] = (
-            splh_cells["sales"]
-            / splh_cells["labor_hours"].where(
-                splh_cells["labor_hours"] > 0
-            )
-        )
-    if splh_cells.empty or "splh" not in splh_cells.columns:
-        splh_cells = splh_cells.iloc[0:0]
-    else:
-        splh_cells = splh_cells[splh_cells["splh"].notna()]
-    if splh_cells.empty:
-        st.caption(
-            "Sales per labor hour shows up once hourly sales "
-            "and clocked labor both fall in this selection."
-        )
-    else:
-        splh_cells = with_hour_fields(splh_cells)
-        splh_cells["day_label"] = splh_cells["business_date"].map(
-            format_day
-        )
-        splh_cells["splh_label"] = splh_cells["splh"].map(
-            lambda value: f"${value:,.0f}"
-        )
-        splh_dates = sorted(splh_cells["business_date"].unique())
-        splh_row_order = [format_day(value) for value in splh_dates]
-        if len(splh_dates) > 1:
-            pooled_splh = (
-                hourly_slice
-                .groupby("hour", as_index=False)
-                .agg(
-                    sales=("sales", "sum"),
-                    transactions=("transactions", "sum"),
-                    labor_hours=("labor_hours", "sum"),
-                )
-            )
-            pooled_splh["splh"] = (
-                pooled_splh["sales"]
-                / pooled_splh["labor_hours"].where(
-                    pooled_splh["labor_hours"] > 0
-                )
-            )
-            pooled_splh = pooled_splh[pooled_splh["splh"].notna()]
-            pooled_splh = with_hour_fields(pooled_splh)
-            pooled_splh["day_label"] = "Week"
-            pooled_splh["splh_label"] = pooled_splh["splh"].map(
-                lambda value: f"${value:,.0f}"
-            )
-            splh_cells = pd.concat(
-                [splh_cells, pooled_splh],
-                ignore_index=True,
-            )
-            splh_row_order = [*splh_row_order, "Week"]
-
-        splh_top = splh_scale_top(splh_cells["splh"].max(skipna=True))
-        splh_caption = (
-            "Each cell is sales during that hour divided by "
-            "labor hours clocked during that hour. Rates under "
-            "\\$70 are red. Rates of \\$70 and above are green, "
-            "darker as the rate rises."
-        )
-        if "Week" in splh_row_order:
-            splh_caption += (
-                " The Week row pools sales and labor for the "
-                "selection, so it is not an average of the daily rates."
-            )
-        st.altair_chart(
-            metric_heatmap(
-                splh_cells,
-                "splh",
+                "menu_board_label",
+                "greet_label",
+                "service_label",
+                "lane_queue_label",
                 "splh_label",
-                splh_row_order,
-                hour_order,
-                splh_top,
-                splh_heatmap_fill,
-                "SpLH",
-                [0, GREEN_SPLH, float(splh_top)],
-                "$,.0f",
-                [
-                    alt.Tooltip("day_label:N", title="Day"),
-                    alt.Tooltip("hour_label:N", title="Hour"),
-                    alt.Tooltip("splh_label:N", title="SpLH"),
-                    alt.Tooltip("sales:Q", title="Sales", format="$,.2f"),
-                    alt.Tooltip(
-                        "labor_hours:Q",
-                        title="Labor hours",
-                        format=",.2f",
-                    ),
-                    alt.Tooltip(
-                        "transactions:Q",
-                        title="Transactions",
-                        format=",.0f",
-                    ),
-                ],
-            ),
-            use_container_width=False,
+                "sales_label",
+                "labor_label",
+                "transactions",
+            ],
+            stack_parts,
         )
-        st.caption(splh_caption)
+        time_bars = (
+            alt.Chart(timed_long)
+            .mark_bar()
+            .encode(
+                x=hour_axis,
+                y=alt.Y(
+                    "minutes:Q",
+                    title="Average minutes",
+                    stack="zero",
+                    axis=alt.Axis(format=".1f"),
+                ),
+                color=alt.Color(
+                    "segment:N",
+                    title=None,
+                    scale=color_scale,
+                    sort=segment_labels,
+                    legend=alt.Legend(orient="top"),
+                ),
+                order=alt.Order("segment_order:Q"),
+                tooltip=hour_tooltip,
+            )
+        )
+        layers = [time_bars]
+        splh_line_df = by_hour[by_hour["splh"].notna()].copy()
+        if not splh_line_df.empty:
+            splh_line = (
+                alt.Chart(splh_line_df)
+                .mark_line(
+                    color="#ff7f0e",
+                    strokeWidth=2.5,
+                    point=alt.OverlayMarkDef(
+                        size=55,
+                        color="#ff7f0e",
+                    ),
+                )
+                .encode(
+                    x=hour_axis,
+                    y=alt.Y(
+                        "splh:Q",
+                        title="Sales per labor hour",
+                        axis=alt.Axis(
+                            orient="right",
+                            format="$,.0f",
+                            titleColor="#ff7f0e",
+                            labelColor="#ff7f0e",
+                        ),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("hour_label:N", title="Hour"),
+                        alt.Tooltip("splh_label:N", title="SpLH"),
+                        alt.Tooltip(
+                            "lane_total_label:N",
+                            title="Lane total",
+                        ),
+                        alt.Tooltip(
+                            "cars:Q",
+                            title="Cars",
+                            format=",.0f",
+                        ),
+                        alt.Tooltip("sales_label:N", title="Sales"),
+                        alt.Tooltip(
+                            "labor_label:N",
+                            title="Labor hours",
+                        ),
+                    ],
+                )
+            )
+            layers.append(splh_line)
+
+        hour_chart = (
+            alt.layer(*layers)
+            .resolve_scale(y="independent")
+            .properties(height=380)
+        )
+        st.altair_chart(hour_chart, use_container_width=True)
+
+        if stack_parts:
+            hour_caption = (
+                "Bars split the average lane time into menu board, "
+                "service, and lane queue. Together they are the "
+                "lane total. "
+            )
+        else:
+            hour_caption = "Bars are the average lane total. "
+        if splh_line_df.empty:
+            hour_caption += (
+                "The sales-per-labor-hour line shows up once "
+                "hourly sales and clocked labor both fall in "
+                "this selection. "
+            )
+        else:
+            hour_caption += (
+                "The line is sales per labor hour for that same "
+                "hour, on the right axis. "
+            )
+        st.caption(
+            hour_caption
+            + "Hours run from 6:00 AM through 5:59 AM. "
+            "GM shifts are excluded."
+        )
 
     table = by_hour.sort_values("hour_index").copy()
     table = table[

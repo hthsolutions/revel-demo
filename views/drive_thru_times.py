@@ -27,23 +27,6 @@ from revel_data import (
 
 STORE_TIMEZONE = ZoneInfo("America/Chicago")
 
-# Menu board, service, and lane queue add up to the lane
-# total on this feed. Greet is already inside menu board.
-PART_COLUMNS = ["menu_board", "service", "lane_queue"]
-PART_LABELS = {
-    "menu_board": "Menu board",
-    "service": "Service",
-    "lane_queue": "Lane queue",
-    "lane_total": "Lane total",
-}
-PART_ORDER = ["Menu board", "Service", "Lane queue", "Lane total"]
-PART_COLORS = {
-    "Menu board": "#1f77b4",
-    "Service": "#17becf",
-    "Lane queue": "#9467bd",
-    "Lane total": "#1f77b4",
-}
-
 # Lane time at or under this stays green. Longer times are red.
 GOAL_MINUTES = 4.0
 HEATMAP_RED = ((103, 0, 13), (239, 59, 44))
@@ -185,22 +168,6 @@ def format_seconds_delta(current, previous):
     if pd.isna(current) or pd.isna(previous):
         return None
     return f"{float(current) - float(previous):+.0f} sec"
-
-
-def parts_add_up(frame: pd.DataFrame) -> bool:
-    """True when menu, service, and queue reconstruct the lane total."""
-
-    if frame.empty:
-        return False
-    residual = (
-        frame["lane_total"]
-        - frame["menu_board"].fillna(0)
-        - frame["service"].fillna(0)
-        - frame["lane_queue"].fillna(0)
-    ).abs()
-    if residual.empty:
-        return False
-    return bool(residual.median() <= 2)
 
 
 def preferred_location(names: pd.Series) -> str:
@@ -530,62 +497,6 @@ def add_duration_labels(frame: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
-def melt_times(
-    frame: pd.DataFrame,
-    id_columns: list[str],
-    stack_parts: bool,
-) -> pd.DataFrame:
-    """One row per time band, in minutes, for a stacked bar."""
-
-    value_columns = PART_COLUMNS if stack_parts else ["lane_total"]
-    long = frame.melt(
-        id_vars=id_columns,
-        value_vars=value_columns,
-        var_name="segment_key",
-        value_name="seconds",
-    )
-    long["segment"] = long["segment_key"].map(PART_LABELS)
-    long["minutes"] = long["seconds"] / 60.0
-    long["segment_order"] = long["segment"].map(
-        {label: index for index, label in enumerate(PART_ORDER)}
-    )
-    return long.dropna(subset=["minutes"])
-
-
-def fill_hour_span(frame: pd.DataFrame) -> pd.DataFrame:
-    """Keep empty hours that sit between the first and last active hour."""
-
-    if frame.empty or frame["hour_index"].isna().all():
-        return frame
-    start = int(frame["hour_index"].min())
-    stop = int(frame["hour_index"].max())
-    present = set(frame["hour_index"].dropna().astype(int))
-    extras = []
-    for index in range(start, stop + 1):
-        if index in present:
-            continue
-        hour = (index + BUSINESS_DAY_START_HOUR) % 24
-        extras.append(
-            {
-                "hour": hour,
-                "hour_index": index,
-                "hour_label": hour_label(hour),
-            }
-        )
-    if not extras:
-        return frame
-    return pd.concat([frame, pd.DataFrame(extras)], ignore_index=True)
-
-
-def segment_scale(labels: list[str]) -> alt.Scale:
-    """Colors for the lane-time bands, in stack order."""
-
-    return alt.Scale(
-        domain=labels,
-        range=[PART_COLORS[label] for label in labels],
-    )
-
-
 st.title("Drive-Thru Times")
 st.caption(
     "Average HME lane time for each car that leaves the "
@@ -702,8 +613,8 @@ weeks_to_display = st.sidebar.slider(
     value=8,
     help=(
         "Days on the drive-thru time heatmap, ending with "
-        "the selected week. The summary and the hourly "
-        "chart use the selected week only."
+        "the selected week. The summary and the scatter "
+        "plot use the selected week only."
     ),
 )
 
@@ -721,18 +632,10 @@ selected_day_label = st.sidebar.selectbox(
     "Day",
     options=["All days", *day_labels.values()],
     help=(
-        "Applies to the summary and the hourly chart. "
+        "Applies to the summary and the scatter plot. "
         "The history chart still shows every day."
     ),
 )
-
-stack_parts = parts_add_up(hme_df)
-segment_labels = (
-    ["Menu board", "Service", "Lane queue"]
-    if stack_parts
-    else ["Lane total"]
-)
-color_scale = segment_scale(segment_labels)
 
 history_start = pd.Timestamp(selected_week) - pd.Timedelta(
     days=7 * (weeks_to_display - 1)
@@ -1119,10 +1022,10 @@ else:
 
 
 # ---------------------------------------------------------
-# Drive-thru time vs sales per labor hour, by clock hour
+# Lane total versus sales per labor hour
 # ---------------------------------------------------------
 
-st.subheader("Drive-thru time and SpLH by hour")
+st.subheader("Lane total drive-thru time")
 
 time_by_hour = rollup_drive_thru_times(slice_df, ["hour"])
 if not hourly_slice.empty:
@@ -1155,178 +1058,125 @@ else:
         how="outer",
     )
     by_hour = with_hour_fields(by_hour)
-    by_hour = fill_hour_span(by_hour)
-    by_hour = add_duration_labels(by_hour)
-    by_hour["splh_label"] = by_hour["splh"].map(
-        lambda value: "—"
-        if pd.isna(value)
-        else f"${value:,.2f}"
-    )
-    by_hour["sales_label"] = by_hour["sales"].map(
-        lambda value: "—"
-        if pd.isna(value)
-        else f"${value:,.2f}"
-    )
-    by_hour["labor_label"] = by_hour["labor_hours"].map(
-        lambda value: "—"
-        if pd.isna(value)
-        else f"{value:,.2f}"
-    )
 
-    hour_order = (
-        by_hour.sort_values("hour_index")
-        .drop_duplicates("hour_label")["hour_label"]
-        .tolist()
-    )
-    hour_axis = alt.X(
-        "hour_label:N",
-        title="Hour",
-        sort=hour_order,
-        scale=alt.Scale(domain=hour_order),
-        axis=alt.Axis(labelAngle=0),
-    )
-    hour_tooltip = [
-        alt.Tooltip("hour_label:N", title="Hour"),
-        alt.Tooltip("segment:N", title="Time"),
-        alt.Tooltip("minutes:Q", title="Minutes", format=".1f"),
-        alt.Tooltip("lane_total_label:N", title="Lane total"),
-        alt.Tooltip("menu_board_label:N", title="Menu board"),
-        alt.Tooltip("greet_label:N", title="Greet"),
-        alt.Tooltip("service_label:N", title="Service"),
-        alt.Tooltip("lane_queue_label:N", title="Lane queue"),
-        alt.Tooltip("cars:Q", title="Cars", format=",.0f"),
-        alt.Tooltip("splh_label:N", title="SpLH"),
-        alt.Tooltip("sales_label:N", title="Sales"),
-        alt.Tooltip("labor_label:N", title="Labor hours"),
-        alt.Tooltip(
-            "transactions:Q",
-            title="Transactions",
-            format=",.0f",
-        ),
-    ]
-
-    timed = by_hour[by_hour["cars"].fillna(0) > 0].copy()
-    if timed.empty:
-        st.info("No cars left the lane in that selection.")
+    scatter_cars = slice_df.dropna(subset=["lane_total"]).copy()
+    scatter_rates = hourly_slice.copy()
+    if not scatter_rates.empty:
+        scatter_rates["splh"] = (
+            scatter_rates["sales"]
+            / scatter_rates["labor_hours"].where(
+                scatter_rates["labor_hours"] > 0
+            )
+        )
+        scatter_rates = scatter_rates.dropna(subset=["splh"])
+        scatter_rates["business_date"] = pd.to_datetime(
+            scatter_rates["business_date"]
+        ).dt.normalize()
+        scatter_rates["hour"] = scatter_rates["hour"].astype(int)
+    if scatter_cars.empty or scatter_rates.empty:
+        scatter_points = pd.DataFrame()
     else:
-        timed_long = melt_times(
-            timed,
-            [
-                "hour",
-                "hour_index",
-                "hour_label",
-                "cars",
-                "lane_total_label",
-                "menu_board_label",
-                "greet_label",
-                "service_label",
-                "lane_queue_label",
-                "splh_label",
-                "sales_label",
-                "labor_label",
-                "transactions",
+        scatter_cars["business_date"] = pd.to_datetime(
+            scatter_cars["business_date"]
+        ).dt.normalize()
+        scatter_points = scatter_cars.merge(
+            scatter_rates[
+                ["location_key", "business_date", "hour", "splh"]
             ],
-            stack_parts,
+            on=["location_key", "business_date", "hour"],
+            how="inner",
         )
-        time_bars = (
-            alt.Chart(timed_long)
-            .mark_bar()
+        scatter_points = scatter_points.dropna(subset=["splh"])
+    if scatter_points.empty:
+        st.info(
+            "The scatter plot needs a lane total and a "
+            "sales-per-labor-hour rate in the same hour."
+        )
+    else:
+        scatter_points = with_hour_fields(scatter_points)
+        scatter_points["minutes"] = scatter_points["lane_total"] / 60.0
+        scatter_points["lane_total_label"] = scatter_points[
+            "lane_total"
+        ].map(format_duration)
+        scatter_points["splh_label"] = scatter_points["splh"].map(
+            lambda value: f"${value:,.2f}"
+        )
+        scatter_points["day_label"] = scatter_points[
+            "business_date"
+        ].map(format_day)
+        y_top = max(
+            float(scatter_points["minutes"].max()),
+            GOAL_MINUTES,
+        )
+        y_top = y_top * 1.08 if y_top > 0 else GOAL_MINUTES
+        target = pd.DataFrame(
+            {
+                "minutes": [GOAL_MINUTES],
+                "target": ["4:00 Target"],
+            }
+        )
+        y_axis = alt.Y(
+            "minutes:Q",
+            title="Lane total (minutes)",
+            scale=alt.Scale(domain=[0, y_top], nice=False),
+            axis=alt.Axis(format=".1f"),
+        )
+        dots = (
+            alt.Chart(scatter_points)
+            .mark_circle(size=64, opacity=0.72, color="#1f77b4")
             .encode(
-                x=hour_axis,
-                y=alt.Y(
-                    "minutes:Q",
-                    title="Average minutes",
-                    stack="zero",
-                    axis=alt.Axis(format=".1f"),
+                x=alt.X(
+                    "splh:Q",
+                    title="Sales per labor hour",
+                    axis=alt.Axis(format="$,.2f"),
                 ),
-                color=alt.Color(
-                    "segment:N",
-                    title=None,
-                    scale=color_scale,
-                    sort=segment_labels,
-                    legend=alt.Legend(orient="top"),
-                ),
-                order=alt.Order("segment_order:Q"),
-                tooltip=hour_tooltip,
+                y=y_axis,
+                tooltip=[
+                    alt.Tooltip("day_label:N", title="Day"),
+                    alt.Tooltip("hour_label:N", title="Hour"),
+                    alt.Tooltip(
+                        "lane_total_label:N",
+                        title="Lane total",
+                    ),
+                    alt.Tooltip("splh_label:N", title="SpLH"),
+                ],
             )
         )
-        layers = [time_bars]
-        splh_line_df = by_hour[by_hour["splh"].notna()].copy()
-        if not splh_line_df.empty:
-            splh_line = (
-                alt.Chart(splh_line_df)
-                .mark_line(
-                    color="#ff7f0e",
-                    strokeWidth=2.5,
-                    point=alt.OverlayMarkDef(
-                        size=55,
-                        color="#ff7f0e",
-                    ),
-                )
-                .encode(
-                    x=hour_axis,
-                    y=alt.Y(
-                        "splh:Q",
-                        title="Sales per labor hour",
-                        axis=alt.Axis(
-                            orient="right",
-                            format="$,.0f",
-                            titleColor="#ff7f0e",
-                            labelColor="#ff7f0e",
-                        ),
-                    ),
-                    tooltip=[
-                        alt.Tooltip("hour_label:N", title="Hour"),
-                        alt.Tooltip("splh_label:N", title="SpLH"),
-                        alt.Tooltip(
-                            "lane_total_label:N",
-                            title="Lane total",
-                        ),
-                        alt.Tooltip(
-                            "cars:Q",
-                            title="Cars",
-                            format=",.0f",
-                        ),
-                        alt.Tooltip("sales_label:N", title="Sales"),
-                        alt.Tooltip(
-                            "labor_label:N",
-                            title="Labor hours",
-                        ),
-                    ],
-                )
+        target_line = (
+            alt.Chart(target)
+            .mark_rule(
+                color="#c0392b",
+                strokeDash=[7, 4],
+                strokeWidth=2,
             )
-            layers.append(splh_line)
-
-        hour_chart = (
-            alt.layer(*layers)
-            .resolve_scale(y="independent")
-            .properties(height=380)
+            .encode(y=y_axis)
         )
-        st.altair_chart(hour_chart, use_container_width=True)
-
-        if stack_parts:
-            hour_caption = (
-                "Bars split the average lane time into menu board, "
-                "service, and lane queue. Together they are the "
-                "lane total. "
+        target_label = (
+            alt.Chart(target)
+            .mark_text(
+                align="left",
+                dx=8,
+                dy=-10,
+                color="#c0392b",
+                fontSize=13,
+                fontWeight="bold",
             )
-        else:
-            hour_caption = "Bars are the average lane total. "
-        if splh_line_df.empty:
-            hour_caption += (
-                "The sales-per-labor-hour line shows up once "
-                "hourly sales and clocked labor both fall in "
-                "this selection. "
+            .encode(
+                x=alt.value(8),
+                y=y_axis,
+                text="target:N",
             )
-        else:
-            hour_caption += (
-                "The line is sales per labor hour for that same "
-                "hour, on the right axis. "
-            )
+        )
+        st.altair_chart(
+            alt.layer(dots, target_line, target_label).properties(
+                height=380
+            ),
+            use_container_width=True,
+        )
         st.caption(
-            hour_caption
-            + "Hours run from 6:00 AM through 5:59 AM. "
-            "GM shifts are excluded."
+            "Each point is one car's lane total, plotted against "
+            "that hour's sales per labor hour. The line is the "
+            "4:00 target."
         )
 
     table = by_hour.sort_values("hour_index").copy()

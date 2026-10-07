@@ -1059,7 +1059,6 @@ else:
     )
     by_hour = with_hour_fields(by_hour)
 
-    scatter_cars = slice_df.dropna(subset=["lane_total"]).copy()
     scatter_rates = hourly_slice.copy()
     if not scatter_rates.empty:
         scatter_rates["splh"] = (
@@ -1073,20 +1072,26 @@ else:
             scatter_rates["business_date"]
         ).dt.normalize()
         scatter_rates["hour"] = scatter_rates["hour"].astype(int)
-    if scatter_cars.empty or scatter_rates.empty:
+    hourly_times = rollup_drive_thru_times(
+        slice_df,
+        ["location_key", "business_date", "hour"],
+    )
+    if hourly_times.empty or scatter_rates.empty:
         scatter_points = pd.DataFrame()
     else:
-        scatter_cars["business_date"] = pd.to_datetime(
-            scatter_cars["business_date"]
+        hourly_times["business_date"] = pd.to_datetime(
+            hourly_times["business_date"]
         ).dt.normalize()
-        scatter_points = scatter_cars.merge(
+        scatter_points = hourly_times.merge(
             scatter_rates[
                 ["location_key", "business_date", "hour", "splh"]
             ],
             on=["location_key", "business_date", "hour"],
             how="inner",
         )
-        scatter_points = scatter_points.dropna(subset=["splh"])
+        scatter_points = scatter_points.dropna(
+            subset=["splh", "lane_total"]
+        )
     if scatter_points.empty:
         st.info(
             "The scatter plot needs a lane total and a "
@@ -1123,7 +1128,7 @@ else:
         )
         dots = (
             alt.Chart(scatter_points)
-            .mark_circle(size=64, opacity=0.72, color="#1f77b4")
+            .mark_circle(size=90, opacity=0.9, color="#1f77b4")
             .encode(
                 x=alt.X(
                     "splh:Q",
@@ -1138,6 +1143,7 @@ else:
                         "lane_total_label:N",
                         title="Lane total",
                     ),
+                    alt.Tooltip("cars:Q", title="Cars", format=",.0f"),
                     alt.Tooltip("splh_label:N", title="SpLH"),
                 ],
             )
@@ -1174,9 +1180,10 @@ else:
             use_container_width=True,
         )
         st.caption(
-            "Each point is one car's lane total, plotted against "
-            "that hour's sales per labor hour. The line is the "
-            "4:00 target."
+            "Each point is one hour. The lane total is the "
+            "average for cars that left during that hour, plotted "
+            "against that hour's sales per labor hour. The line "
+            "is the 4:00 target."
         )
 
     table = by_hour.sort_values("hour_index").copy()

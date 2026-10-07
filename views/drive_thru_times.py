@@ -44,6 +44,11 @@ PART_COLORS = {
     "Lane total": "#1f77b4",
 }
 
+# Lane time at or under this stays green. Longer times are red.
+GOAL_MINUTES = 4.0
+HEATMAP_RED = ((103, 0, 13), (239, 59, 44))
+HEATMAP_GREEN = ((102, 189, 99), (0, 68, 27))
+
 
 def format_week(week_start) -> str:
     """Label a week by its first and last calendar day."""
@@ -70,6 +75,71 @@ def format_duration(seconds) -> str:
     total = abs(total)
     minutes, remainder = divmod(total, 60)
     return f"{sign}{minutes}:{remainder:02d}"
+
+
+def _srgb_channel(value: float) -> float:
+    value = value / 255
+    if value <= 0.04045:
+        return value / 12.92
+    return ((value + 0.055) / 1.055) ** 2.4
+
+
+def _mix_color(start, end, amount: float):
+    blend = min(max(amount, 0.0), 1.0)
+    return tuple(
+        round(start[index] + (end[index] - start[index]) * blend)
+        for index in range(3)
+    )
+
+
+def heatmap_top(minutes_max: float) -> float:
+    """Keep the 4-minute break on the scale."""
+
+    if pd.isna(minutes_max) or minutes_max <= 0:
+        return GOAL_MINUTES
+    return max(float(minutes_max), GOAL_MINUTES)
+
+
+def heatmap_fill(minutes, top: float):
+    """Green at 4 minutes or under, red when the lane runs longer.
+
+    Darker green is a faster lane. Darker red is a slower one.
+    """
+
+    if minutes is None or pd.isna(minutes):
+        return None
+    amount = float(minutes)
+    if amount <= GOAL_MINUTES:
+        return _mix_color(
+            HEATMAP_GREEN[1],
+            HEATMAP_GREEN[0],
+            amount / GOAL_MINUTES,
+        )
+    span = max(float(top) - GOAL_MINUTES, 0.01)
+    return _mix_color(
+        HEATMAP_RED[1],
+        HEATMAP_RED[0],
+        (amount - GOAL_MINUTES) / span,
+    )
+
+
+def heatmap_color_hex(minutes, top: float):
+    fill = heatmap_fill(minutes, top)
+    if fill is None:
+        return None
+    return "#{:02x}{:02x}{:02x}".format(*fill)
+
+
+def heatmap_label_color(minutes, top: float) -> str:
+    """Use white type on dark red and dark green cells."""
+
+    fill = heatmap_fill(minutes, top)
+    if fill is None:
+        return "#1a1a1a"
+    red, green, blue = (_srgb_channel(part) for part in fill)
+    luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+    # Tiles near 4:00 are light green, so they need dark type.
+    return "#ffffff" if luminance < 0.30 else "#1a1a1a"
 
 
 def format_seconds_delta(current, previous):
@@ -596,9 +666,9 @@ weeks_to_display = st.sidebar.slider(
     max_value=26,
     value=8,
     help=(
-        "Daily drive-thru times ending with the selected week. "
-        "The summary and the hourly chart use the selected "
-        "week only."
+        "Days on the drive-thru time heatmap, ending with "
+        "the selected week. The summary and the hourly "
+        "chart use the selected week only."
     ),
 )
 
@@ -831,7 +901,7 @@ if (
 
 
 # ---------------------------------------------------------
-# Drive-thru times over time
+# Drive-thru time by day and hour
 # ---------------------------------------------------------
 
 st.subheader("Drive-thru time by day")
@@ -839,47 +909,69 @@ st.subheader("Drive-thru time by day")
 if history_df.empty:
     st.info("No drive-thru departures fall in that history.")
 else:
-    daily = rollup_drive_thru_times(
+    day_cells = rollup_drive_thru_times(
         history_df,
-        ["business_date", "week_start"],
+        ["business_date", "hour"],
     )
-    daily = add_duration_labels(daily)
-    daily["in_selected_week"] = (
-        daily["week_start"] == pd.Timestamp(selected_week)
+    day_cells = with_hour_fields(day_cells)
+    day_cells = add_duration_labels(day_cells)
+    day_cells["minutes"] = day_cells["lane_total"] / 60.0
+    history_dates = sorted(day_cells["business_date"].unique())
+    years_span = (
+        pd.Series(pd.to_datetime(history_dates)).dt.year.nunique() > 1
     )
-    daily_long = melt_times(
-        daily,
-        [
-            "business_date",
-            "week_start",
-            "in_selected_week",
-            "cars",
-            "lane_total_label",
-            "menu_board_label",
-            "greet_label",
-            "service_label",
-            "lane_queue_label",
-            "avg_cars_in_lane",
-        ],
-        stack_parts,
+
+    def history_day_label(business_date) -> str:
+        stamp = pd.Timestamp(business_date)
+        if years_span:
+            return (
+                f"{WEEKDAY_NAMES[stamp.weekday()][:3]} "
+                f"{stamp:%m/%d/%y}"
+            )
+        return format_day(stamp)
+
+    day_cells["day_label"] = day_cells["business_date"].map(
+        history_day_label
     )
-    daily_axis = alt.X(
-        "yearmonthdate(business_date):O",
-        title=None,
-        axis=alt.Axis(
-            format="%b %d",
-            labelAngle=-45,
-            labelOverlap="greedy",
-        ),
+    day_order = [history_day_label(value) for value in history_dates]
+    row_order = list(day_order)
+    if len(day_order) > 1:
+        pooled = rollup_drive_thru_times(history_df, ["hour"])
+        pooled = with_hour_fields(pooled)
+        pooled = add_duration_labels(pooled)
+        pooled["minutes"] = pooled["lane_total"] / 60.0
+        pooled["day_label"] = "All"
+        day_cells = pd.concat([day_cells, pooled], ignore_index=True)
+        row_order = [*day_order, "All"]
+
+    scale_top = heatmap_top(day_cells["minutes"].max(skipna=True))
+    day_cells["fill_color"] = day_cells["minutes"].map(
+        lambda value: heatmap_color_hex(value, scale_top)
     )
-    daily_tooltip = [
-        alt.Tooltip(
-            "business_date:T",
-            title="Day",
-            format="%B %d, %Y",
-        ),
-        alt.Tooltip("segment:N", title="Time"),
-        alt.Tooltip("minutes:Q", title="Minutes", format=".1f"),
+    day_cells["label_color"] = day_cells["minutes"].map(
+        lambda value: heatmap_label_color(value, scale_top)
+    )
+    legend_steps = 80
+    legend_df = pd.DataFrame(
+        {
+            "minutes": [
+                scale_top * step / legend_steps
+                for step in range(legend_steps + 1)
+            ]
+        }
+    )
+    legend_df["minutes_end"] = legend_df["minutes"].shift(-1)
+    legend_df = legend_df.dropna()
+    legend_df["fill_color"] = legend_df["minutes"].map(
+        lambda value: heatmap_color_hex(value, scale_top)
+    )
+    legend_ticks = [0, GOAL_MINUTES]
+    if scale_top > GOAL_MINUTES + 0.05:
+        legend_ticks.append(float(scale_top))
+
+    heatmap_tooltip = [
+        alt.Tooltip("day_label:N", title="Day"),
+        alt.Tooltip("hour_label:N", title="Hour"),
         alt.Tooltip("lane_total_label:N", title="Lane total"),
         alt.Tooltip("menu_board_label:N", title="Menu board"),
         alt.Tooltip("greet_label:N", title="Greet"),
@@ -892,52 +984,100 @@ else:
             format=".1f",
         ),
     ]
-    daily_bars = (
-        alt.Chart(daily_long)
-        .mark_bar()
+    hour_sort = alt.SortField(field="hour_index")
+    heatmap_base = alt.Chart(day_cells)
+    heatmap_rects = (
+        heatmap_base
+        .transform_filter("isValid(datum.minutes)")
+        .mark_rect(stroke="white", strokeWidth=1)
         .encode(
-            x=daily_axis,
+            x=alt.X(
+                "hour_label:N",
+                title="Hour",
+                sort=hour_sort,
+                axis=alt.Axis(labelAngle=0),
+            ),
             y=alt.Y(
-                "minutes:Q",
-                title="Average minutes",
-                stack="zero",
-                axis=alt.Axis(format=".1f"),
+                "day_label:N",
+                title=None,
+                sort=row_order,
             ),
             color=alt.Color(
-                "segment:N",
-                title=None,
-                scale=color_scale,
-                sort=segment_labels,
-                legend=alt.Legend(orient="top"),
+                "fill_color:N",
+                scale=None,
+                legend=None,
             ),
-            order=alt.Order("segment_order:Q"),
-            opacity=alt.condition(
-                alt.datum.in_selected_week,
-                alt.value(0.95),
-                alt.value(0.4),
-            ),
-            tooltip=daily_tooltip,
+            tooltip=heatmap_tooltip,
         )
-        .properties(height=380)
     )
-    st.altair_chart(daily_bars, use_container_width=True)
+    heatmap_labels = (
+        heatmap_base
+        .transform_filter("isValid(datum.minutes)")
+        .mark_text(fontSize=12, fontWeight="bold")
+        .encode(
+            x=alt.X(
+                "hour_label:N",
+                title="Hour",
+                sort=hour_sort,
+            ),
+            y=alt.Y(
+                "day_label:N",
+                title=None,
+                sort=row_order,
+            ),
+            text=alt.Text("lane_total_label:N"),
+            color=alt.Color(
+                "label_color:N",
+                scale=None,
+                legend=None,
+            ),
+        )
+    )
+    heatmap_legend = (
+        alt.Chart(legend_df)
+        .mark_rect()
+        .encode(
+            y=alt.Y(
+                "minutes:Q",
+                title="Minutes",
+                scale=alt.Scale(domain=[0, scale_top], nice=False),
+                axis=alt.Axis(format=".1f", values=legend_ticks),
+            ),
+            y2="minutes_end:Q",
+            color=alt.Color(
+                "fill_color:N",
+                scale=None,
+                legend=None,
+            ),
+        )
+        .properties(width=18, height=max(len(row_order), 1) * 46)
+    )
+    heatmap = (
+        alt.hconcat(
+            alt.layer(heatmap_rects, heatmap_labels).properties(
+                width=alt.Step(72),
+                height=alt.Step(46),
+            ),
+            heatmap_legend,
+        )
+        .configure_view(strokeWidth=0, clip=False)
+    )
+    st.altair_chart(heatmap, use_container_width=False)
 
     history_from = history_df["business_date"].min()
     history_to = history_df["business_date"].max()
-    if stack_parts:
-        history_caption = (
-            "Each band is the average for that part of the visit. "
-            "Menu board, service, and lane queue add up to the "
-            "lane total. Greet sits inside the menu-board time. "
-        )
-    else:
-        history_caption = (
-            "Each bar is the average lane total for cars that "
-            "left that day. "
+    history_caption = (
+        "Each cell is the average lane time for cars that "
+        "left during that hour. 4:00 and under is green, "
+        "and darker green is a faster lane. Above 4:00 is "
+        "red, and darker red is a slower lane. "
+    )
+    if len(day_order) > 1:
+        history_caption += (
+            "The All row pools every day in this history. "
         )
     st.caption(
         history_caption
-        + "Darker days are the selected week. "
         + f"History runs {history_from:%b %d, %Y} through "
         + f"{history_to:%b %d, %Y}."
     )

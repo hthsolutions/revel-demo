@@ -1592,6 +1592,151 @@ else:
                 "4:00 target."
             )
 
+        st.subheader(
+            "Drive-thru time vs. transactions per 15 minutes"
+        )
+        if scatter_sales.empty or quarter_times.empty:
+            txn_points = pd.DataFrame()
+        else:
+            txn_sales = scatter_sales.copy()
+            txn_sales["business_date"] = pd.to_datetime(
+                txn_sales["business_date"]
+            ).dt.normalize()
+            txn_sales = txn_sales[
+                txn_sales["business_date"].isin(slice_dates)
+            ]
+            txn_base = quarter_times.dropna(subset=["lane_total"]).copy()
+            txn_base["business_date"] = pd.to_datetime(
+                txn_base["business_date"]
+            ).dt.normalize()
+            txn_points = txn_base.merge(
+                txn_sales[
+                    [
+                        "location_key",
+                        "business_date",
+                        "hour",
+                        "quarter_minute",
+                        "transactions",
+                    ]
+                ],
+                on=[
+                    "location_key",
+                    "business_date",
+                    "hour",
+                    "quarter_minute",
+                ],
+                how="inner",
+            )
+            txn_points = txn_points.dropna(
+                subset=["transactions", "lane_total"]
+            )
+        if txn_points.empty:
+            st.info(
+                "This scatter plot needs a lane total and "
+                "restaurant transactions in the same 15 minutes."
+            )
+        else:
+            txn_points = with_hour_fields(txn_points)
+            txn_points["minutes"] = txn_points["lane_total"] / 60.0
+            txn_points["lane_total_label"] = txn_points[
+                "lane_total"
+            ].map(format_duration)
+            txn_points["interval_label"] = [
+                quarter_label(hour, minute)
+                for hour, minute in zip(
+                    txn_points["hour"],
+                    txn_points["quarter_minute"],
+                )
+            ]
+            txn_points["day_label"] = txn_points["business_date"].map(
+                format_day
+            )
+            txn_top = max(
+                float(txn_points["minutes"].max()),
+                GOAL_MINUTES,
+            )
+            txn_top = txn_top * 1.08 if txn_top > 0 else GOAL_MINUTES
+            txn_target = pd.DataFrame(
+                {
+                    "minutes": [GOAL_MINUTES],
+                    "target": ["4:00 Target"],
+                }
+            )
+            txn_y = alt.Y(
+                "minutes:Q",
+                title="Lane total (minutes)",
+                scale=alt.Scale(domain=[0, txn_top], nice=False),
+                axis=alt.Axis(format=".1f"),
+            )
+            txn_dots = (
+                alt.Chart(txn_points)
+                .mark_circle(size=90, opacity=0.9, color="#1f77b4")
+                .encode(
+                    x=alt.X(
+                        "transactions:Q",
+                        title="Transactions per 15 minutes",
+                        axis=alt.Axis(format=",.0f"),
+                    ),
+                    y=txn_y,
+                    tooltip=[
+                        alt.Tooltip("day_label:N", title="Day"),
+                        alt.Tooltip(
+                            "interval_label:N",
+                            title="Interval",
+                        ),
+                        alt.Tooltip(
+                            "lane_total_label:N",
+                            title="Lane total",
+                        ),
+                        alt.Tooltip(
+                            "transactions:Q",
+                            title="Transactions",
+                            format=",.0f",
+                        ),
+                    ],
+                )
+            )
+            txn_line = (
+                alt.Chart(txn_target)
+                .mark_rule(
+                    color="#c0392b",
+                    strokeDash=[7, 4],
+                    strokeWidth=2,
+                )
+                .encode(y=txn_y)
+            )
+            txn_label = (
+                alt.Chart(txn_target)
+                .mark_text(
+                    align="left",
+                    dx=8,
+                    dy=-10,
+                    color="#c0392b",
+                    fontSize=13,
+                    fontWeight="bold",
+                )
+                .encode(
+                    x=alt.value(8),
+                    y=txn_y,
+                    text="target:N",
+                )
+            )
+            st.altair_chart(
+                alt.layer(
+                    txn_dots,
+                    txn_line,
+                    txn_label,
+                ).properties(height=380),
+                use_container_width=True,
+            )
+            st.caption(
+                "Each point is one 15-minute interval. The lane "
+                "total is the average for cars that left during "
+                "that interval, plotted against total restaurant "
+                "transactions rung in those same 15 minutes. "
+                "The line is the 4:00 target."
+            )
+
     table = by_hour.sort_values("hour_index").copy()
     table = table[
         (table["cars"].fillna(0) > 0)

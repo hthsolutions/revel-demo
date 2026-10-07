@@ -1477,6 +1477,121 @@ else:
                 "The line is the 4:00 target."
             )
 
+        st.subheader("Drive-thru time vs. cars per 15 minutes")
+        volume_points = quarter_times.dropna(
+            subset=["lane_total", "cars"]
+        ).copy()
+        if volume_points.empty:
+            st.info("No cars left the lane in that selection.")
+        else:
+            volume_points["business_date"] = pd.to_datetime(
+                volume_points["business_date"]
+            ).dt.normalize()
+            volume_points = with_hour_fields(volume_points)
+            volume_points["minutes"] = (
+                volume_points["lane_total"] / 60.0
+            )
+            volume_points["lane_total_label"] = volume_points[
+                "lane_total"
+            ].map(format_duration)
+            volume_points["interval_label"] = [
+                quarter_label(hour, minute)
+                for hour, minute in zip(
+                    volume_points["hour"],
+                    volume_points["quarter_minute"],
+                )
+            ]
+            volume_points["day_label"] = volume_points[
+                "business_date"
+            ].map(format_day)
+            volume_top = max(
+                float(volume_points["minutes"].max()),
+                GOAL_MINUTES,
+            )
+            volume_top = (
+                volume_top * 1.08 if volume_top > 0 else GOAL_MINUTES
+            )
+            volume_target = pd.DataFrame(
+                {
+                    "minutes": [GOAL_MINUTES],
+                    "target": ["4:00 Target"],
+                }
+            )
+            volume_y = alt.Y(
+                "minutes:Q",
+                title="Lane total (minutes)",
+                scale=alt.Scale(domain=[0, volume_top], nice=False),
+                axis=alt.Axis(format=".1f"),
+            )
+            volume_dots = (
+                alt.Chart(volume_points)
+                .mark_circle(size=90, opacity=0.9, color="#1f77b4")
+                .encode(
+                    x=alt.X(
+                        "cars:Q",
+                        title="Cars per 15 minutes",
+                        axis=alt.Axis(format=",.0f"),
+                    ),
+                    y=volume_y,
+                    tooltip=[
+                        alt.Tooltip("day_label:N", title="Day"),
+                        alt.Tooltip(
+                            "interval_label:N",
+                            title="Interval",
+                        ),
+                        alt.Tooltip(
+                            "lane_total_label:N",
+                            title="Lane total",
+                        ),
+                        alt.Tooltip(
+                            "cars:Q",
+                            title="Cars",
+                            format=",.0f",
+                        ),
+                    ],
+                )
+            )
+            volume_line = (
+                alt.Chart(volume_target)
+                .mark_rule(
+                    color="#c0392b",
+                    strokeDash=[7, 4],
+                    strokeWidth=2,
+                )
+                .encode(y=volume_y)
+            )
+            volume_label = (
+                alt.Chart(volume_target)
+                .mark_text(
+                    align="left",
+                    dx=8,
+                    dy=-10,
+                    color="#c0392b",
+                    fontSize=13,
+                    fontWeight="bold",
+                )
+                .encode(
+                    x=alt.value(8),
+                    y=volume_y,
+                    text="target:N",
+                )
+            )
+            st.altair_chart(
+                alt.layer(
+                    volume_dots,
+                    volume_line,
+                    volume_label,
+                ).properties(height=380),
+                use_container_width=True,
+            )
+            st.caption(
+                "Each point is one 15-minute interval. The lane "
+                "total is the average for cars that left during "
+                "that interval, plotted against how many cars "
+                "left in those same 15 minutes. The line is the "
+                "4:00 target."
+            )
+
     table = by_hour.sort_values("hour_index").copy()
     table = table[
         (table["cars"].fillna(0) > 0)

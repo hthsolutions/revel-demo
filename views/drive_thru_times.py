@@ -142,6 +142,34 @@ def heatmap_label_color(minutes, top: float) -> str:
     return "#ffffff" if luminance < 0.30 else "#1a1a1a"
 
 
+def splh_range_label(value) -> str | None:
+    """Bucket a sales-per-labor-hour rate into a $10 range.
+
+    0 through 9.99 is "0-9". 10 through 19.99 is "10-19".
+    """
+
+    if value is None or pd.isna(value) or float(value) < 0:
+        return None
+    start = int(float(value) // 10) * 10
+    return f"{start}-{start + 9}"
+
+
+def splh_range_order(labels: list[str]) -> list[str]:
+    """Ranges from 0-9 through the highest range that has data."""
+
+    starts = []
+    for label in labels:
+        if label is None or pd.isna(label):
+            continue
+        starts.append(int(str(label).split("-")[0]))
+    if not starts:
+        return []
+    return [
+        f"{start}-{start + 9}"
+        for start in range(0, max(starts) + 1, 10)
+    ]
+
+
 def format_seconds_delta(current, previous):
     """Signed second change, or None when either side is missing."""
 
@@ -1345,6 +1373,171 @@ else:
             "Avg cars in lane is the stack still behind a car "
             "at departure, not the count of cars served."
         )
+
+# ---------------------------------------------------------
+# Lane time by the hour's sales-per-labor-hour range
+# ---------------------------------------------------------
+
+st.subheader("Drive-thru time by SpLH range")
+
+range_rates = hourly_slice.copy()
+if not range_rates.empty:
+    range_rates["splh"] = (
+        range_rates["sales"]
+        / range_rates["labor_hours"].where(range_rates["labor_hours"] > 0)
+    )
+    range_rates = range_rates.dropna(subset=["splh"])
+    range_rates["business_date"] = pd.to_datetime(
+        range_rates["business_date"]
+    ).dt.normalize()
+    range_rates["hour"] = range_rates["hour"].astype(int)
+    range_rates["splh_range"] = range_rates["splh"].map(splh_range_label)
+
+range_cars = slice_df.copy()
+if range_rates.empty or range_cars.empty:
+    ranged = pd.DataFrame()
+else:
+    range_cars["business_date"] = pd.to_datetime(
+        range_cars["business_date"]
+    ).dt.normalize()
+    ranged = range_cars.merge(
+        range_rates[
+            [
+                "location_key",
+                "business_date",
+                "hour",
+                "splh",
+                "splh_range",
+            ]
+        ],
+        on=["location_key", "business_date", "hour"],
+        how="inner",
+    )
+    ranged = ranged.dropna(subset=["splh_range"])
+
+if ranged.empty:
+    st.info(
+        "This heatmap needs drive-thru departures and a "
+        "sales-per-labor-hour rate in the same hour."
+    )
+else:
+    range_cells = rollup_drive_thru_times(
+        ranged,
+        ["hour", "splh_range"],
+    )
+    range_cells = with_hour_fields(range_cells)
+    range_cells = add_duration_labels(range_cells)
+    range_cells["minutes"] = range_cells["lane_total"] / 60.0
+    range_order = splh_range_order(range_cells["splh_range"].tolist())
+    hour_order = (
+        range_cells.sort_values("hour_index")
+        .drop_duplicates("hour_label")["hour_label"]
+        .tolist()
+    )
+    range_top = heatmap_top(range_cells["minutes"].max(skipna=True))
+    range_cells["fill_color"] = range_cells["minutes"].map(
+        lambda value: heatmap_color_hex(value, range_top)
+    )
+    range_cells["label_color"] = range_cells["minutes"].map(
+        lambda value: heatmap_label_color(value, range_top)
+    )
+    range_steps = 80
+    range_legend = pd.DataFrame(
+        {
+            "minutes": [
+                range_top * step / range_steps
+                for step in range(range_steps + 1)
+            ]
+        }
+    )
+    range_legend["minutes_end"] = range_legend["minutes"].shift(-1)
+    range_legend = range_legend.dropna()
+    range_legend["fill_color"] = range_legend["minutes"].map(
+        lambda value: heatmap_color_hex(value, range_top)
+    )
+    range_ticks = [0, GOAL_MINUTES]
+    if range_top > GOAL_MINUTES + 0.05:
+        range_ticks.append(float(range_top))
+
+    range_base = alt.Chart(range_cells)
+    range_rects = (
+        range_base
+        .transform_filter("isValid(datum.minutes)")
+        .mark_rect(stroke="white", strokeWidth=1)
+        .encode(
+            x=alt.X(
+                "splh_range:N",
+                title="SpLH",
+                sort=range_order,
+                scale=alt.Scale(domain=range_order),
+                axis=alt.Axis(labelAngle=0),
+            ),
+            y=alt.Y(
+                "hour_label:N",
+                title=None,
+                sort=hour_order,
+            ),
+            color=alt.Color("fill_color:N", scale=None, legend=None),
+            tooltip=[
+                alt.Tooltip("hour_label:N", title="Hour"),
+                alt.Tooltip("splh_range:N", title="SpLH range"),
+                alt.Tooltip("lane_total_label:N", title="Lane total"),
+                alt.Tooltip("cars:Q", title="Cars", format=",.0f"),
+            ],
+        )
+    )
+    range_labels = (
+        range_base
+        .transform_filter("isValid(datum.minutes)")
+        .mark_text(fontSize=12, fontWeight="bold")
+        .encode(
+            x=alt.X(
+                "splh_range:N",
+                title="SpLH",
+                sort=range_order,
+                scale=alt.Scale(domain=range_order),
+            ),
+            y=alt.Y(
+                "hour_label:N",
+                title=None,
+                sort=hour_order,
+            ),
+            text=alt.Text("lane_total_label:N"),
+            color=alt.Color("label_color:N", scale=None, legend=None),
+        )
+    )
+    range_scale = (
+        alt.Chart(range_legend)
+        .mark_rect()
+        .encode(
+            y=alt.Y(
+                "minutes:Q",
+                title="Minutes",
+                scale=alt.Scale(domain=[0, range_top], nice=False),
+                axis=alt.Axis(format=".1f", values=range_ticks),
+            ),
+            y2="minutes_end:Q",
+            color=alt.Color("fill_color:N", scale=None, legend=None),
+        )
+        .properties(width=18, height=max(len(hour_order), 1) * 46)
+    )
+    st.altair_chart(
+        alt.hconcat(
+            alt.layer(range_rects, range_labels).properties(
+                width=alt.Step(72),
+                height=alt.Step(46),
+            ),
+            range_scale,
+        ).configure_view(strokeWidth=0, clip=False),
+        use_container_width=False,
+    )
+    st.caption(
+        "Each cell is the average lane time for cars that left "
+        "during that hour, in the \\$10 sales-per-labor-hour "
+        "range for that same hour. 4:00 and under is green, "
+        "and darker green is a faster lane. Above 4:00 is red, "
+        "and darker red is a slower lane."
+    )
 
 st.caption(
     f"Drive-thru times for {selected_location.lower()}, "

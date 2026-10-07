@@ -1289,6 +1289,7 @@ else:
                     "hour",
                     "quarter_minute",
                     "splh",
+                    "labor_hours",
                 ]
             ],
             on=[
@@ -1402,6 +1403,79 @@ else:
             "interval, plotted against sales per labor hour for "
             "the same 15 minutes. The line is the 4:00 target."
         )
+
+        scatter_points["cars_per_labor_hour"] = (
+            scatter_points["cars"]
+            / scatter_points["labor_hours"].where(
+                scatter_points["labor_hours"] > 0
+            )
+        )
+        car_points = scatter_points.dropna(
+            subset=["cars_per_labor_hour"]
+        ).copy()
+        car_points["cars_per_labor_hour_label"] = car_points[
+            "cars_per_labor_hour"
+        ].map(lambda value: f"{value:,.1f}")
+        st.subheader("Drive-thru time vs. cars per labor hour")
+        if car_points.empty:
+            st.info(
+                "This scatter plot needs cars and clocked labor "
+                "in the same 15 minutes."
+            )
+        else:
+            car_dots = (
+                alt.Chart(car_points)
+                .mark_circle(size=90, opacity=0.9, color="#1f77b4")
+                .encode(
+                    x=alt.X(
+                        "cars_per_labor_hour:Q",
+                        title="Cars per labor hour",
+                        axis=alt.Axis(format=",.1f"),
+                    ),
+                    y=y_axis,
+                    tooltip=[
+                        alt.Tooltip("day_label:N", title="Day"),
+                        alt.Tooltip(
+                            "interval_label:N",
+                            title="Interval",
+                        ),
+                        alt.Tooltip(
+                            "lane_total_label:N",
+                            title="Lane total",
+                        ),
+                        alt.Tooltip(
+                            "cars:Q",
+                            title="Cars",
+                            format=",.0f",
+                        ),
+                        alt.Tooltip(
+                            "cars_per_labor_hour_label:N",
+                            title="Cars per labor hour",
+                        ),
+                        alt.Tooltip(
+                            "labor_hours:Q",
+                            title="Labor hours",
+                            format=",.2f",
+                        ),
+                    ],
+                )
+            )
+            st.altair_chart(
+                alt.layer(
+                    car_dots,
+                    target_line,
+                    target_label,
+                ).properties(height=380),
+                use_container_width=True,
+            )
+            st.caption(
+                "Each point is one 15-minute interval. The lane "
+                "total is the average for cars that left during "
+                "that interval, plotted against cars per labor "
+                "hour for the same 15 minutes. Cars per labor "
+                "hour is departures divided by hours clocked. "
+                "The line is the 4:00 target."
+            )
 
     table = by_hour.sort_values("hour_index").copy()
     table = table[

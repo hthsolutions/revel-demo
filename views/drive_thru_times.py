@@ -580,26 +580,8 @@ selected_week_day = st.sidebar.selectbox(
     format_func=lambda value: format_week(pd.Timestamp(value)),
 )
 selected_week = pd.Timestamp(selected_week_day)
-weeks_to_display = st.sidebar.slider(
-    "Weeks of history",
-    min_value=2,
-    max_value=26,
-    value=8,
-    help=(
-        "Days on the drive-thru time heatmap, ending with "
-        "the selected week. Those days are listed in the "
-        "day filter."
-    ),
-)
-
-week_cars = hme_df[hme_df["week_start"] == selected_week]
-history_start = pd.Timestamp(selected_week) - pd.Timedelta(
-    days=7 * (weeks_to_display - 1)
-)
-history_df = hme_df[
-    (hme_df["week_start"] >= history_start)
-    & (hme_df["week_start"] <= pd.Timestamp(selected_week))
-].copy()
+week_cars = hme_df[hme_df["week_start"] == selected_week].copy()
+history_df = week_cars
 history_days = sorted(
     {
         pd.Timestamp(value).date()
@@ -628,12 +610,11 @@ selected_day = st.sidebar.selectbox(
     format_func=history_day_option,
     key=(
         f"drive_thru_day_{selected_location}_"
-        f"{selected_week.date().isoformat()}_{weeks_to_display}"
+        f"{selected_week.date().isoformat()}"
     ),
     help=(
-        "Every day on the heatmap. Choosing one limits "
-        "the summary, the heatmap, and the hourly "
-        "breakdown to that day."
+        "Limits the summary, the day heatmap, and the "
+        "hourly breakdown to that day of the selected week."
     ),
 )
 selected_day_label = history_day_option(selected_day)
@@ -828,7 +809,7 @@ if (
 st.subheader("Drive-thru time by day")
 
 if history_df.empty:
-    st.info("No drive-thru departures fall in that history.")
+    st.info("No drive-thru departures fall in that week.")
 else:
     day_cells = rollup_drive_thru_times(
         history_df,
@@ -995,11 +976,11 @@ else:
     )
     if len(day_order) > 1:
         history_caption += (
-            "The All row pools every day in this history. "
+            "The All row pools every day in this week. "
         )
     st.caption(
         history_caption
-        + f"History runs {history_from:%b %d, %Y} through "
+        + f"Showing {history_from:%b %d, %Y} through "
         + f"{history_to:%b %d, %Y}."
     )
 

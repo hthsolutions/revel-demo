@@ -1737,6 +1737,86 @@ else:
                 "The line is the 4:00 target."
             )
 
+        st.subheader("SpLH vs. lane total")
+        splh_top = max(
+            float(scatter_points["minutes"].max()),
+            GOAL_MINUTES,
+        )
+        splh_top = splh_top * 1.08 if splh_top > 0 else GOAL_MINUTES
+        splh_target = pd.DataFrame(
+            {
+                "minutes": [GOAL_MINUTES],
+                "target": ["4:00 Target"],
+            }
+        )
+        splh_x = alt.X(
+            "minutes:Q",
+            title="Lane total (minutes)",
+            scale=alt.Scale(domain=[0, splh_top], nice=False),
+            axis=alt.Axis(format=".1f"),
+        )
+        splh_dots = (
+            alt.Chart(scatter_points)
+            .mark_circle(size=90, opacity=0.9, color="#1f77b4")
+            .encode(
+                x=splh_x,
+                y=alt.Y(
+                    "splh:Q",
+                    title="Sales per labor hour",
+                    axis=alt.Axis(format="$,.2f"),
+                ),
+                tooltip=[
+                    alt.Tooltip("day_label:N", title="Day"),
+                    alt.Tooltip("interval_label:N", title="Interval"),
+                    alt.Tooltip(
+                        "lane_total_label:N",
+                        title="Lane total",
+                    ),
+                    alt.Tooltip("splh_label:N", title="SpLH"),
+                    alt.Tooltip("cars:Q", title="Cars", format=",.0f"),
+                ],
+            )
+        )
+        splh_line = (
+            alt.Chart(splh_target)
+            .mark_rule(
+                color="#c0392b",
+                strokeDash=[7, 4],
+                strokeWidth=2,
+            )
+            .encode(x=splh_x)
+        )
+        splh_label = (
+            alt.Chart(splh_target)
+            .mark_text(
+                align="left",
+                dx=8,
+                dy=12,
+                color="#c0392b",
+                fontSize=13,
+                fontWeight="bold",
+            )
+            .encode(
+                x=splh_x,
+                y=alt.value(8),
+                text="target:N",
+            )
+        )
+        st.altair_chart(
+            alt.layer(
+                splh_dots,
+                splh_line,
+                splh_label,
+            ).properties(height=380),
+            use_container_width=True,
+        )
+        st.caption(
+            "Each point is one 15-minute interval. Sales per "
+            "labor hour is plotted against the average lane "
+            "total for cars that left during that interval. "
+            "The line is the 4:00 target."
+        )
+
     table = by_hour.sort_values("hour_index").copy()
     table = table[
         (table["cars"].fillna(0) > 0)

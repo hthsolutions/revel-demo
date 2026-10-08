@@ -580,8 +580,8 @@ weeks_to_display = st.sidebar.slider(
     value=8,
     help=(
         "Days on the drive-thru time heatmap, ending with "
-        "the selected week. The summary and the hourly "
-        "breakdown use the selected week only."
+        "the selected week. A chosen day limits the "
+        "heatmap to that day."
     ),
 )
 
@@ -592,15 +592,15 @@ day_choices = (
     .sort_values("business_date")
 )
 day_labels = {
-    pd.Timestamp(value): format_day(value)
+    pd.Timestamp(value).normalize(): format_day(value)
     for value in day_choices["business_date"]
 }
 selected_day_label = st.sidebar.selectbox(
     "Day",
     options=["All days", *day_labels.values()],
     help=(
-        "Applies to the summary and the hourly breakdown. "
-        "The history chart still shows every day."
+        "Limits the summary, the day heatmap, and the "
+        "hourly breakdown to that day."
     ),
 )
 
@@ -625,6 +625,13 @@ else:
     }
     slice_df = week_cars[
         pd.to_datetime(week_cars["business_date"]).dt.normalize().isin(
+            slice_dates
+        )
+    ].copy()
+
+if selected_day_label != "All days":
+    history_df = history_df[
+        pd.to_datetime(history_df["business_date"]).dt.normalize().isin(
             slice_dates
         )
     ].copy()

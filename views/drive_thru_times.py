@@ -20,7 +20,6 @@ from revel_data import (
     load_hme_departures,
     load_hourly_sales,
     load_shift_summary,
-    percent_change,
     rollup_drive_thru_times,
 )
 
@@ -440,15 +439,16 @@ def period_rates(frame: pd.DataFrame) -> dict:
     return rolled.iloc[0].to_dict()
 
 
-def period_splh(frame: pd.DataFrame) -> float:
-    """Sales per labor hour for a set of store hours."""
+def compliance_rate(frame: pd.DataFrame):
+    """Share of departures at or under the 4-minute lane goal."""
 
-    if frame.empty or "labor_hours" not in frame.columns:
-        return float("nan")
-    labor_hours = float(frame["labor_hours"].fillna(0).sum())
-    if labor_hours <= 0:
-        return float("nan")
-    return float(frame["sales"].fillna(0).sum()) / labor_hours
+    if frame.empty or "lane_total" not in frame.columns:
+        return None
+    times = frame["lane_total"].dropna()
+    if times.empty:
+        return None
+    on_goal = (times / 60.0) <= GOAL_MINUTES
+    return float(on_goal.sum()) / float(len(times))
 
 
 def add_duration_labels(frame: pd.DataFrame) -> pd.DataFrame:
@@ -709,20 +709,8 @@ if not hourly_store.empty:
         hourly_slice = hourly_slice[
             hourly_slice["business_date"].isin(slice_dates)
         ].copy()
-    previous_hours = hourly_store[
-        hourly_store["week_start"] == previous_week
-    ].copy()
-    if selected_day_label != "All days":
-        previous_hours = previous_hours[
-            previous_hours["business_date"].isin(previous_dates)
-        ].copy()
 else:
     hourly_slice = hourly_store
-    previous_hours = hourly_store
-
-current_splh = period_splh(hourly_slice)
-previous_splh = period_splh(previous_hours)
-splh_change = percent_change(current_splh, previous_splh)
 
 if sales_skipped:
     st.warning(
@@ -750,7 +738,16 @@ lane_delta = format_seconds_delta(
     current_times.get("lane_total"),
     previous_times.get("lane_total"),
 )
-kpi_columns = st.columns(4)
+current_compliance = compliance_rate(slice_df)
+previous_compliance = compliance_rate(previous_cars)
+compliance_delta = None
+if (
+    current_compliance is not None
+    and previous_compliance is not None
+):
+    points = (current_compliance - previous_compliance) * 100
+    compliance_delta = f"{points:+.1f} pts"
+kpi_columns = st.columns(3)
 kpi_columns[0].metric(
     "Cars",
     f"{int(current_times.get('cars', 0)):,}",
@@ -763,24 +760,14 @@ kpi_columns[1].metric(
     help="Average time from entering the lane to leaving it.",
 )
 kpi_columns[2].metric(
-    "Greet",
-    format_duration(current_times.get("greet")),
+    "% Compliance",
+    "—"
+    if current_compliance is None
+    else f"{current_compliance * 100:.1f}%",
+    delta=compliance_delta,
     help=(
-        "Average time until the first greeting. On this "
-        "feed that time sits inside the menu-board time."
-    ),
-)
-kpi_columns[3].metric(
-    "SpLH",
-    "—" if pd.isna(current_splh) else f"${current_splh:,.2f}",
-    delta=(
-        None
-        if pd.isna(splh_change)
-        else f"{splh_change:+.1f}%"
-    ),
-    help=(
-        "Sales during this selection divided by labor hours "
-        "clocked in the same hours. GM shifts are excluded."
+        "Share of cars in this selection whose lane total "
+        "was 4:00 or under."
     ),
 )
 
@@ -790,7 +777,7 @@ queue_label = format_duration(current_times.get("lane_queue"))
 st.caption(
     f"Menu board {menu_label}. Service {service_label}. "
     f"Lane queue {queue_label}. "
-    "The change on lane total and SpLH is versus the "
+    "The change on lane total and compliance is versus the "
     "previous week"
     + (
         "."

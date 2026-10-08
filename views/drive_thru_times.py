@@ -1737,9 +1737,31 @@ else:
                 "The line is the 4:00 target."
             )
 
-        st.subheader("SpLH vs. lane total")
+        st.subheader("Median SpLH vs. median lane total")
+        median_points = (
+            scatter_points
+            .groupby(["hour", "quarter_minute"], as_index=False)
+            .agg(
+                minutes=("minutes", "median"),
+                splh=("splh", "median"),
+                intervals=("minutes", "size"),
+            )
+        )
+        median_points["lane_total_label"] = (
+            median_points["minutes"] * 60
+        ).map(format_duration)
+        median_points["splh_label"] = median_points["splh"].map(
+            lambda value: f"${value:,.2f}"
+        )
+        median_points["interval_label"] = [
+            quarter_label(hour, minute)
+            for hour, minute in zip(
+                median_points["hour"],
+                median_points["quarter_minute"],
+            )
+        ]
         splh_top = max(
-            float(scatter_points["minutes"].max()),
+            float(median_points["minutes"].max()),
             GOAL_MINUTES,
         )
         splh_top = splh_top * 1.08 if splh_top > 0 else GOAL_MINUTES
@@ -1751,29 +1773,35 @@ else:
         )
         splh_x = alt.X(
             "minutes:Q",
-            title="Lane total (minutes)",
+            title="Median lane total (minutes)",
             scale=alt.Scale(domain=[0, splh_top], nice=False),
             axis=alt.Axis(format=".1f"),
         )
         splh_dots = (
-            alt.Chart(scatter_points)
+            alt.Chart(median_points)
             .mark_circle(size=90, opacity=0.9, color="#1f77b4")
             .encode(
                 x=splh_x,
                 y=alt.Y(
                     "splh:Q",
-                    title="Sales per labor hour",
+                    title="Median sales per labor hour",
                     axis=alt.Axis(format="$,.2f"),
                 ),
                 tooltip=[
-                    alt.Tooltip("day_label:N", title="Day"),
-                    alt.Tooltip("interval_label:N", title="Interval"),
+                    alt.Tooltip("interval_label:N", title="Increment"),
                     alt.Tooltip(
                         "lane_total_label:N",
-                        title="Lane total",
+                        title="Median lane total",
                     ),
-                    alt.Tooltip("splh_label:N", title="SpLH"),
-                    alt.Tooltip("cars:Q", title="Cars", format=",.0f"),
+                    alt.Tooltip(
+                        "splh_label:N",
+                        title="Median SpLH",
+                    ),
+                    alt.Tooltip(
+                        "intervals:Q",
+                        title="Intervals",
+                        format=",.0f",
+                    ),
                 ],
             )
         )
@@ -1811,10 +1839,11 @@ else:
             use_container_width=True,
         )
         st.caption(
-            "Each point is one 15-minute interval. Sales per "
-            "labor hour is plotted against the average lane "
-            "total for cars that left during that interval. "
-            "The line is the 4:00 target."
+            "Each point is one 15-minute increment, such as "
+            "10:00–10:15. Its lane total is the median of the "
+            "interval averages, and its sales per labor hour is "
+            "the median rate for that same increment. The line "
+            "is the 4:00 target."
         )
 
     table = by_hour.sort_values("hour_index").copy()

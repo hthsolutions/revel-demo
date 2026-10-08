@@ -587,31 +587,12 @@ weeks_to_display = st.sidebar.slider(
     value=8,
     help=(
         "Days on the drive-thru time heatmap, ending with "
-        "the selected week. A chosen day limits the "
-        "heatmap to that day."
+        "the selected week. Those days are listed in the "
+        "day filter."
     ),
 )
 
 week_cars = hme_df[hme_df["week_start"] == selected_week]
-day_choices = (
-    week_cars[["business_date"]]
-    .drop_duplicates()
-    .sort_values("business_date")
-)
-day_labels = {
-    pd.Timestamp(value).normalize(): format_day(value)
-    for value in day_choices["business_date"]
-}
-selected_day_label = st.sidebar.selectbox(
-    "Day",
-    options=["All days", *day_labels.values()],
-    key=f"drive_thru_day_{selected_week.date().isoformat()}",
-    help=(
-        "Limits the summary, the day heatmap, and the "
-        "hourly breakdown to that day."
-    ),
-)
-
 history_start = pd.Timestamp(selected_week) - pd.Timedelta(
     days=7 * (weeks_to_display - 1)
 )
@@ -619,30 +600,57 @@ history_df = hme_df[
     (hme_df["week_start"] >= history_start)
     & (hme_df["week_start"] <= pd.Timestamp(selected_week))
 ].copy()
+history_days = sorted(
+    {
+        pd.Timestamp(value).date()
+        for value in pd.to_datetime(history_df["business_date"])
+        .dt.normalize()
+        .dropna()
+        .unique()
+    }
+)
+day_years = {value.year for value in history_days}
 
-if selected_day_label == "All days":
+def history_day_option(value) -> str:
+    """Label a heatmap day, with the year when the window crosses one."""
+
+    if value == "All days":
+        return "All days"
+    stamp = pd.Timestamp(value)
+    weekday = WEEKDAY_NAMES[stamp.weekday()][:3]
+    if len(day_years) > 1:
+        return f"{weekday} {stamp:%m/%d/%y}"
+    return f"{weekday} {stamp:%m/%d}"
+
+selected_day = st.sidebar.selectbox(
+    "Day",
+    options=["All days", *history_days],
+    format_func=history_day_option,
+    key=(
+        f"drive_thru_day_{selected_location}_"
+        f"{selected_week.date().isoformat()}_{weeks_to_display}"
+    ),
+    help=(
+        "Every day on the heatmap. Choosing one limits "
+        "the summary, the heatmap, and the hourly "
+        "breakdown to that day."
+    ),
+)
+selected_day_label = history_day_option(selected_day)
+
+if selected_day == "All days":
     slice_df = week_cars.copy()
     slice_dates = set(
         pd.to_datetime(week_cars["business_date"]).dt.normalize()
     )
 else:
-    slice_dates = {
-        business_date
-        for business_date, label in day_labels.items()
-        if label == selected_day_label
-    }
-    slice_df = week_cars[
-        pd.to_datetime(week_cars["business_date"]).dt.normalize().isin(
-            slice_dates
-        )
-    ].copy()
-
-if selected_day_label != "All days":
-    history_df = history_df[
+    slice_dates = {pd.Timestamp(selected_day).normalize()}
+    slice_df = history_df[
         pd.to_datetime(history_df["business_date"]).dt.normalize().isin(
             slice_dates
         )
     ].copy()
+    history_df = slice_df
 
 previous_week = pd.Timestamp(selected_week) - pd.Timedelta(days=7)
 if selected_day_label == "All days":
@@ -713,12 +721,13 @@ if not hourly_store.empty:
     hourly_store["week_start"] = pd.to_datetime(
         hourly_store["week_start"]
     ).dt.normalize()
-    hourly_slice = hourly_store[
-        hourly_store["week_start"] == pd.Timestamp(selected_week)
-    ].copy()
-    if selected_day_label != "All days":
-        hourly_slice = hourly_slice[
-            hourly_slice["business_date"].isin(slice_dates)
+    if selected_day == "All days":
+        hourly_slice = hourly_store[
+            hourly_store["week_start"] == pd.Timestamp(selected_week)
+        ].copy()
+    else:
+        hourly_slice = hourly_store[
+            hourly_store["business_date"].isin(slice_dates)
         ].copy()
 else:
     hourly_slice = hourly_store
@@ -738,11 +747,13 @@ if shift_error:
 # Selected week or day
 # ---------------------------------------------------------
 
-slice_title = (
-    format_week(selected_week)
-    if selected_day_label == "All days"
-    else f"{selected_day_label}, {format_week(selected_week)}"
-)
+if selected_day == "All days" or history_df.empty:
+    slice_title = format_week(selected_week)
+else:
+    chosen_week = history_df["week_start"].iloc[0]
+    slice_title = (
+        f"{selected_day_label}, {format_week(chosen_week)}"
+    )
 st.subheader(slice_title)
 
 lane_delta = format_seconds_delta(

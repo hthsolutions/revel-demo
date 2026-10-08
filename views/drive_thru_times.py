@@ -564,15 +564,22 @@ if not shift_df.empty and "location_key" in shift_df.columns:
     ].copy()
 
 hme_df = add_week_columns(hme_df, week_start_weekday)
+hme_df["week_start"] = pd.to_datetime(
+    hme_df["week_start"]
+).dt.normalize()
 week_starts = sorted(
-    hme_df["week_start"].dropna().unique(),
+    {
+        pd.Timestamp(value).date()
+        for value in hme_df["week_start"].dropna().unique()
+    },
     reverse=True,
 )
-selected_week = st.sidebar.selectbox(
+selected_week_day = st.sidebar.selectbox(
     "Week",
     options=week_starts,
-    format_func=format_week,
+    format_func=lambda value: format_week(pd.Timestamp(value)),
 )
+selected_week = pd.Timestamp(selected_week_day)
 weeks_to_display = st.sidebar.slider(
     "Weeks of history",
     min_value=2,
@@ -598,6 +605,7 @@ day_labels = {
 selected_day_label = st.sidebar.selectbox(
     "Day",
     options=["All days", *day_labels.values()],
+    key=f"drive_thru_day_{selected_week.date().isoformat()}",
     help=(
         "Limits the summary, the day heatmap, and the "
         "hourly breakdown to that day."
@@ -702,6 +710,9 @@ else:
 
 if not hourly_store.empty:
     hourly_store = add_week_columns(hourly_store, week_start_weekday)
+    hourly_store["week_start"] = pd.to_datetime(
+        hourly_store["week_start"]
+    ).dt.normalize()
     hourly_slice = hourly_store[
         hourly_store["week_start"] == pd.Timestamp(selected_week)
     ].copy()

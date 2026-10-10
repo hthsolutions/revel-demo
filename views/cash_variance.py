@@ -1,11 +1,11 @@
+import datetime as dt
+
 import pandas as pd
 import streamlit as st
 
 from revel_data import (
     CASH_SUMMARY_NUMERIC_COLUMNS,
-    WEEK_START_OPTIONS,
     MissingSecretError,
-    add_week_columns,
     escape_dollar_signs,
     load_cash_summary,
     location_filter_controls,
@@ -16,8 +16,6 @@ from revel_data import (
 # Supabase table, so the detail table leaves them out.
 HELPER_COLUMNS = [
     "location_key",
-    "day_index",
-    "week_start",
 ]
 
 MONEY_COLUMNS = [
@@ -27,12 +25,32 @@ MONEY_COLUMNS = [
 ]
 
 
-def format_week(week_start) -> str:
-    """Label a week by its first and last calendar day."""
+def format_range(start, end) -> str:
+    """Label a calendar range by its first and last day."""
 
-    start = pd.Timestamp(week_start)
-    end = start + pd.Timedelta(days=6)
-    return f"{start:%b %d} – {end:%b %d, %Y}"
+    start_ts = pd.Timestamp(start)
+    end_ts = pd.Timestamp(end)
+    if start_ts.normalize() == end_ts.normalize():
+        return f"{start_ts:%b %d, %Y}"
+    if start_ts.year == end_ts.year:
+        return f"{start_ts:%b %d} – {end_ts:%b %d, %Y}"
+    return f"{start_ts:%b %d, %Y} – {end_ts:%b %d, %Y}"
+
+
+def selected_bounds(selected_dates):
+    """Start and end from a date-input range, once both are set."""
+
+    if isinstance(selected_dates, dt.date):
+        return selected_dates, selected_dates
+
+    dates = list(selected_dates)
+    if len(dates) < 2:
+        return None
+
+    start, end = dates[0], dates[1]
+    if end < start:
+        start, end = end, start
+    return start, end
 
 
 def format_signed_currency(value) -> str:
@@ -152,7 +170,7 @@ if "variance" not in cash_df.columns:
 
 
 # ---------------------------------------------------------
-# Sidebar: location, week, and the tolerance amount
+# Sidebar: location, dates, and the tolerance amount
 # ---------------------------------------------------------
 
 st.sidebar.header("Filters")
@@ -165,21 +183,27 @@ if location_df.empty:
     st.warning("No cash summary rows match that location.")
     st.stop()
 
-selected_week_start_name = st.sidebar.selectbox(
-    "Week starts on",
-    options=list(WEEK_START_OPTIONS.keys()),
-)
-week_start_weekday = WEEK_START_OPTIONS[selected_week_start_name]
+if "business_date" not in location_df.columns:
+    st.error(
+        "daily-revel-cash-summary has no business_date column."
+    )
+    st.stop()
 
-location_df = add_week_columns(location_df, week_start_weekday)
-week_starts = sorted(
-    location_df["week_start"].dropna().unique(),
-    reverse=True,
-)
-selected_week = st.sidebar.selectbox(
-    "Week",
-    options=week_starts,
-    format_func=format_week,
+available_dates = location_df["business_date"].dropna()
+if available_dates.empty:
+    st.warning("No cash summary rows have a business date.")
+    st.stop()
+
+min_date = available_dates.min().date()
+max_date = available_dates.max().date()
+default_start = max(min_date, max_date - dt.timedelta(days=6))
+
+selected_dates = st.sidebar.date_input(
+    "Date range",
+    value=(default_start, max_date),
+    min_value=min_date,
+    max_value=max_date,
+    key=f"cash_variance_range_{selected_location}",
 )
 tolerance = st.sidebar.number_input(
     "Tolerance X ($)",
@@ -192,17 +216,26 @@ tolerance = st.sidebar.number_input(
         "Days outside it are listed below."
     ),
 )
-
-week_df = location_df[
-    location_df["week_start"] == selected_week
-].copy()
-
-if week_df.empty:
-    st.info("No cash summary rows fall in that week.")
+bounds = selected_bounds(selected_dates)
+if bounds is None:
+    st.info("Select a start and end date.")
     st.stop()
 
-week_label = format_week(selected_week)
-measured = week_df.dropna(subset=["variance"])
+start_date, end_date = bounds
+
+range_df = location_df[
+    location_df["business_date"].between(
+        pd.Timestamp(start_date),
+        pd.Timestamp(end_date),
+    )
+].copy()
+
+if range_df.empty:
+    st.info("No cash summary rows fall in that date range.")
+    st.stop()
+
+range_label = format_range(start_date, end_date)
+measured = range_df.dropna(subset=["variance"])
 within = measured[measured["variance"].abs() <= tolerance]
 outside = measured[measured["variance"].abs() > tolerance]
 surplus = extreme_row(measured, pick_largest=True)
@@ -211,17 +244,17 @@ tolerance_label = f"${tolerance:,.2f}"
 
 
 # ---------------------------------------------------------
-# KPIs for the selected week
+# KPIs for the selected dates
 # ---------------------------------------------------------
 
-st.subheader(week_label)
+st.subheader(range_label)
 
 summary_columns = st.columns(4)
 
 summary_columns[0].metric(
     f"Days within ±{tolerance_label}",
     f"{len(within):,}",
-    help=f"{selected_location} · {week_label}",
+    help=f"{selected_location} · {range_label}",
 )
 
 summary_columns[1].metric(
@@ -279,7 +312,7 @@ summary_columns[3].metric(
 st.subheader(f"Days outside ±{tolerance_label}")
 st.caption(
     escape_dollar_signs(
-        f"{len(outside):,} days in {week_label}, sorted by "
+        f"{len(outside):,} days in {range_label}, sorted by "
         "variance descending. Source: "
         "public.daily-revel-cash-summary."
     )
@@ -288,7 +321,7 @@ st.caption(
 if outside.empty:
     st.info(
         escape_dollar_signs(
-            f"Every business day in {week_label} is within "
+            f"Every business day in {range_label} is within "
             f"±{tolerance_label}."
         )
     )

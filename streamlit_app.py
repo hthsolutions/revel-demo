@@ -45,6 +45,11 @@ navigation = st.navigation(
             title="Cash Variance",
             icon="💰",
         ),
+        st.Page(
+            "views/discount_reason.py",
+            title="Discount Reason",
+            icon="🏷️",
+        ),
     ]
 )
 

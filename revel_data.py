@@ -4,6 +4,8 @@ Every page imports from here so that table names, data
 cleaning, and week definitions stay consistent.
 """
 
+import json
+
 import pandas as pd
 import streamlit as st
 from zoneinfo import ZoneInfo
@@ -23,6 +25,7 @@ SHIFT_SUMMARY_TABLE = SHIFT_TABLE
 COMBO_MIX_TABLE = "daily-product-mix-combomix"
 HME_TABLE = "daily-hme-rcd-summary"
 CASH_SUMMARY_TABLE = "daily-revel-cash-summary"
+DISCOUNT_REASON_TABLE = "daily-revel-discount-reason"
 
 # HME departure timestamps are store-local. A visit before
 # 6:00 AM belongs to the previous business date, matching
@@ -1257,3 +1260,167 @@ def load_cash_summary() -> pd.DataFrame:
         return dataframe.sort_values("business_date")
 
     return dataframe
+
+
+# Loyalty and Standard are a second split of the same
+# dollars as the named reasons. TOTAL repeats that amount.
+_DISCOUNT_ROLLUP_REASONS = {
+    "total",
+    "loyalty",
+    "standard",
+}
+
+
+def _parse_discount_payload(value) -> dict:
+    """Turn a jsonb value into a reason-to-amounts mapping."""
+
+    if value is None:
+        return {}
+    if isinstance(value, float) and pd.isna(value):
+        return {}
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                return {}
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+def _discount_payload_column(dataframe: pd.DataFrame) -> str | None:
+    """Column that holds the reason object."""
+
+    for name in dataframe.columns:
+        key = name.strip().lower().replace(" ", "_")
+        if key == "discount_reasons":
+            return name
+
+    for name in dataframe.columns:
+        series = dataframe[name].dropna()
+        if series.empty:
+            continue
+        sample = series.iloc[0]
+        if isinstance(sample, dict):
+            return name
+        if isinstance(sample, str) and sample.strip().startswith("{"):
+            return name
+    return None
+
+
+def _is_discount_rollup(reason: str) -> bool:
+    return reason.strip().lower() in _DISCOUNT_ROLLUP_REASONS
+
+
+def _reason_records(
+    dataframe: pd.DataFrame,
+    payload_column: str,
+    keep_rollups: bool,
+) -> list[dict]:
+    records = []
+    for row in dataframe.to_dict("records"):
+        payload = _parse_discount_payload(row.get(payload_column))
+        for reason, stats in payload.items():
+            reason_name = str(reason).strip()
+            if not reason_name:
+                continue
+            if reason_name.lower() == "total":
+                continue
+            if _is_discount_rollup(reason_name) and not keep_rollups:
+                continue
+            if not isinstance(stats, dict):
+                continue
+            records.append(
+                {
+                    "location": row.get("location"),
+                    "business_date": row.get("business_date"),
+                    "reason": reason_name,
+                    "qty": stats.get("qty"),
+                    "amount": stats.get("total"),
+                }
+            )
+    return records
+
+
+def expand_discount_reasons(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """One row per location, day, and named discount reason."""
+
+    if dataframe.empty:
+        return pd.DataFrame(
+            columns=[
+                "location",
+                "business_date",
+                "reason",
+                "qty",
+                "amount",
+            ]
+        )
+
+    payload_column = _discount_payload_column(dataframe)
+    if payload_column is None:
+        return pd.DataFrame()
+
+    records = _reason_records(
+        dataframe,
+        payload_column,
+        keep_rollups=False,
+    )
+    if not records:
+        records = _reason_records(
+            dataframe,
+            payload_column,
+            keep_rollups=True,
+        )
+    if not records:
+        return pd.DataFrame()
+
+    expanded = pd.DataFrame(records)
+    expanded["business_date"] = (
+        pd.to_datetime(
+            expanded["business_date"],
+            errors="coerce",
+            utc=True,
+        )
+        .dt.tz_localize(None)
+        .dt.normalize()
+    )
+    expanded = _coerce_numeric(expanded, ["qty", "amount"])
+    expanded = expanded.dropna(subset=["business_date", "reason"])
+
+    if "location" in expanded.columns:
+        expanded = _add_location_key(expanded)
+
+    return expanded.sort_values(
+        ["business_date", "location", "reason"]
+    )
+
+
+@st.cache_data(ttl=300)
+def load_discount_reasons() -> pd.DataFrame:
+    """Named discount reasons from the daily reason extract."""
+
+    columns = get_table_columns(DISCOUNT_REASON_TABLE)
+    if not columns:
+        return pd.DataFrame()
+
+    order_column = _pick_column(
+        columns,
+        ["business_date", "id"],
+    )
+    if order_column is None:
+        order_column = columns[0]
+
+    dataframe = fetch_table(
+        DISCOUNT_REASON_TABLE,
+        columns,
+        order_column,
+    )
+    return expand_discount_reasons(dataframe)

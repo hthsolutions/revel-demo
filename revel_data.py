@@ -22,6 +22,7 @@ HOURLY_SALES_TABLE = "revel_hourly_sales"
 SHIFT_SUMMARY_TABLE = SHIFT_TABLE
 COMBO_MIX_TABLE = "daily-product-mix-combomix"
 HME_TABLE = "daily-hme-rcd-summary"
+CASH_SUMMARY_TABLE = "daily-revel-cash-summary"
 
 # HME departure timestamps are store-local. A visit before
 # 6:00 AM belongs to the previous business date, matching
@@ -1187,3 +1188,72 @@ def load_combo_mix() -> pd.DataFrame:
     return dataframe.sort_values(
         ["business_date", "location", "product_class", "product_name"]
     )
+
+
+CASH_SUMMARY_NUMERIC_COLUMNS = [
+    "starting_cash",
+    "cash_payments",
+    "pay_ins",
+    "pay_outs",
+    "safe_drops",
+    "total_expected_cash",
+    "expected_cash_from_tills",
+    "other",
+    "declared_cash",
+    "variance",
+    "expected_total_cash_to_business",
+    "actual_total_cash_to_business",
+    "number_of_no_sales",
+]
+
+
+@st.cache_data(ttl=300)
+def load_cash_summary() -> pd.DataFrame:
+    """Retrieve every column of the daily cash summary."""
+
+    columns = get_table_columns(CASH_SUMMARY_TABLE)
+    if not columns:
+        return pd.DataFrame()
+
+    order_column = _pick_column(
+        columns,
+        ["business_date", "id"],
+    )
+    if order_column is None:
+        order_column = columns[0]
+
+    dataframe = fetch_table(
+        CASH_SUMMARY_TABLE,
+        columns,
+        order_column,
+    )
+
+    if dataframe.empty:
+        return dataframe
+
+    if "business_date" in dataframe.columns:
+        dataframe["business_date"] = (
+            pd.to_datetime(
+                dataframe["business_date"],
+                errors="coerce",
+                utc=True,
+            )
+            .dt.tz_localize(None)
+            .dt.normalize()
+        )
+
+    numeric_columns = [
+        column_name
+        for column_name in CASH_SUMMARY_NUMERIC_COLUMNS
+        if column_name in dataframe.columns
+    ]
+    dataframe = _coerce_numeric(dataframe, numeric_columns)
+
+    if "location" in dataframe.columns:
+        dataframe = _add_location_key(dataframe)
+
+    if "business_date" in dataframe.columns:
+        dataframe = dataframe.dropna(subset=["business_date"])
+        return dataframe.sort_values("business_date")
+
+    return dataframe

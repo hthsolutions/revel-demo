@@ -40,6 +40,11 @@ navigation = st.navigation(
             title="Combo Mix",
             icon="🍗",
         ),
+        st.Page(
+            "views/cash_variance.py",
+            title="Cash Variance",
+            icon="💰",
+        ),
     ]
 )
 

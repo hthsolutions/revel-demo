@@ -8,6 +8,7 @@ from revel_data import (
     MissingSecretError,
     escape_dollar_signs,
     load_discount_reasons,
+    load_sales_data,
     location_filter_controls,
 )
 
@@ -38,6 +39,47 @@ def selected_bounds(selected_dates):
     if end < start:
         start, end = end, start
     return start, end
+
+
+def net_sales_for(
+    sales_frame: pd.DataFrame,
+    location_keys,
+    start_date,
+    end_date,
+) -> float:
+    """Net sales for the selected locations and calendar range."""
+
+    if (
+        sales_frame.empty
+        or "net_sales" not in sales_frame.columns
+        or "location_key" not in sales_frame.columns
+        or "business_date" not in sales_frame.columns
+    ):
+        return float("nan")
+
+    sales = sales_frame.copy()
+    sales["business_date"] = pd.to_datetime(
+        sales["business_date"],
+        errors="coerce",
+    ).dt.normalize()
+    sales = sales[
+        sales["location_key"].isin(location_keys)
+        & sales["business_date"].between(
+            pd.Timestamp(start_date),
+            pd.Timestamp(end_date),
+        )
+    ]
+    if sales.empty:
+        return float("nan")
+    return float(sales["net_sales"].sum())
+
+
+def format_sales_share(discount_dollars: float, net_sales: float) -> str:
+    """Discount dollars as a percent of net sales."""
+
+    if pd.isna(net_sales) or net_sales == 0:
+        return "—"
+    return f"{discount_dollars / net_sales:.1%}"
 
 
 def reason_shares(frame: pd.DataFrame) -> pd.DataFrame:
@@ -213,13 +255,43 @@ if shares.empty:
 
 discount_dollars = float(shares["amount"].sum())
 top_reason = shares.iloc[0]
-summary = st.columns(2)
+
+try:
+    sales_df = load_sales_data()
+except Exception:
+    sales_df = pd.DataFrame()
+
+location_keys = (
+    location_df["location_key"].unique()
+    if "location_key" in location_df.columns
+    else []
+)
+net_sales = net_sales_for(
+    sales_df,
+    location_keys,
+    start_date,
+    end_date,
+)
+if pd.isna(net_sales) or net_sales == 0:
+    sales_help = "Net sales were not available for this date range."
+else:
+    sales_help = escape_dollar_signs(
+        f"${discount_dollars:,.2f} of ${net_sales:,.2f} net sales "
+        f"in {range_label}."
+    )
+
+summary = st.columns(3)
 summary[0].metric(
     "Discount dollars",
     f"${discount_dollars:,.2f}",
     help=f"{selected_location} · {range_label}",
 )
 summary[1].metric(
+    "Discount % of net sales",
+    format_sales_share(discount_dollars, net_sales),
+    help=sales_help,
+)
+summary[2].metric(
     f"{top_reason['reason']} share",
     f"{top_reason['share']:.1%}",
     help=escape_dollar_signs(

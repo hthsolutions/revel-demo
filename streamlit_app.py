@@ -50,6 +50,11 @@ navigation = st.navigation(
             title="Discount Reason",
             icon="🏷️",
         ),
+        st.Page(
+            "views/waste_percent.py",
+            title="Waste %",
+            icon="🗑️",
+        ),
     ]
 )
 

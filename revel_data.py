@@ -26,6 +26,7 @@ COMBO_MIX_TABLE = "daily-product-mix-combomix"
 HME_TABLE = "daily-hme-rcd-summary"
 CASH_SUMMARY_TABLE = "daily-revel-cash-summary"
 DISCOUNT_REASON_TABLE = "daily-revel-discount-reason"
+WASTE_LOG_TABLE = "waste_log_history"
 
 # HME departure timestamps are store-local. A visit before
 # 6:00 AM belongs to the previous business date, matching
@@ -1424,3 +1425,78 @@ def load_discount_reasons() -> pd.DataFrame:
         order_column,
     )
     return expand_discount_reasons(dataframe)
+
+
+WASTE_LOG_COLUMNS = [
+    "waste_date",
+    "location",
+    "item",
+    "uom",
+    "qty",
+    "each_amount",
+    "total",
+]
+
+WASTE_LOG_NUMERIC_COLUMNS = [
+    "qty",
+    "each_amount",
+    "total",
+]
+
+
+def waste_category(item) -> str | None:
+    """Chicken and fries are the only waste lines this view scores."""
+
+    name = str(item).strip().upper()
+    if "CHICKEN" in name:
+        return "chicken"
+    if "FRIES" in name or name.startswith("FRY"):
+        return "fries"
+    return None
+
+
+@st.cache_data(ttl=300)
+def load_waste_log() -> pd.DataFrame:
+    """Chicken and fries waste dollars from the waste log."""
+
+    columns = get_table_columns(WASTE_LOG_TABLE)
+    if not columns:
+        return pd.DataFrame()
+
+    selected = [
+        column
+        for column in WASTE_LOG_COLUMNS
+        if column in columns
+    ]
+    if not {"waste_date", "location", "item", "total"} <= set(selected):
+        return pd.DataFrame()
+
+    order_column = (
+        "waste_date" if "waste_date" in columns else selected[0]
+    )
+    dataframe = fetch_table(
+        WASTE_LOG_TABLE,
+        selected,
+        order_column,
+    )
+    if dataframe.empty:
+        return dataframe
+
+    dataframe = dataframe.rename(columns={"waste_date": "business_date"})
+    dataframe["business_date"] = pd.to_datetime(
+        dataframe["business_date"],
+        errors="coerce",
+    ).dt.normalize()
+    for column in WASTE_LOG_NUMERIC_COLUMNS:
+        if column in dataframe.columns:
+            dataframe[column] = pd.to_numeric(
+                dataframe[column],
+                errors="coerce",
+            ).fillna(0)
+
+    dataframe["category"] = dataframe["item"].map(waste_category)
+    dataframe = dataframe[dataframe["category"].notna()].copy()
+    dataframe = _add_location_key(dataframe)
+    return dataframe.sort_values(
+        ["business_date", "location", "category"]
+    ).reset_index(drop=True)

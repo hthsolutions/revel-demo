@@ -53,6 +53,18 @@ def selected_bounds(selected_dates):
     return start, end
 
 
+def format_within_share(within_count: int, measured_count: int) -> str:
+    """Share of measured days that fall inside the tolerance."""
+
+    if measured_count == 0:
+        return "—"
+
+    percent = 100 * within_count / measured_count
+    if percent == round(percent):
+        return f"{percent:.0f}%"
+    return f"{percent:.1f}%"
+
+
 def format_signed_currency(value) -> str:
     """Currency with the sign in front of the dollar mark."""
 
@@ -249,20 +261,29 @@ tolerance_label = f"${tolerance:,.2f}"
 
 st.subheader(range_label)
 
-summary_columns = st.columns(4)
+summary_columns = st.columns(5)
 
 summary_columns[0].metric(
+    "% of days within tolerance",
+    format_within_share(len(within), len(measured)),
+    help=escape_dollar_signs(
+        f"{len(within):,} of {len(measured):,} days in "
+        f"{range_label} are within ±{tolerance_label}."
+    ),
+)
+
+summary_columns[1].metric(
     f"Days within ±{tolerance_label}",
     f"{len(within):,}",
     help=f"{selected_location} · {range_label}",
 )
 
-summary_columns[1].metric(
+summary_columns[2].metric(
     f"Days outside ±{tolerance_label}",
     f"{len(outside):,}",
 )
 
-summary_columns[2].metric(
+summary_columns[3].metric(
     "Max Surplus Variance",
     (
         format_signed_currency(surplus["variance"])
@@ -283,7 +304,7 @@ summary_columns[2].metric(
     ),
 )
 
-summary_columns[3].metric(
+summary_columns[4].metric(
     "Max Shortage Variance",
     (
         format_signed_currency(shortage["variance"])

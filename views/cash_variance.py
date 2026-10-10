@@ -114,6 +114,30 @@ def detail_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return detail
 
 
+def variance_cell_style(value) -> str:
+    """Green for a surplus, red for a shortage."""
+
+    if pd.isna(value) or value == 0:
+        return ""
+    if value > 0:
+        return (
+            "background-color: rgba(34, 139, 84, 0.18); "
+            "color: #157347"
+        )
+    return (
+        "background-color: rgba(180, 35, 24, 0.16); "
+        "color: #b42318"
+    )
+
+
+def style_detail(frame: pd.DataFrame):
+    """Color the variance column by sign."""
+
+    if "variance" not in frame.columns:
+        return frame
+    return frame.style.map(variance_cell_style, subset=["variance"])
+
+
 def detail_column_config(
     columns: list[str],
 ) -> dict:
@@ -349,7 +373,7 @@ if outside.empty:
 else:
     table = detail_frame(outside)
     st.dataframe(
-        table,
+        style_detail(table),
         use_container_width=True,
         hide_index=True,
         column_config=detail_column_config(list(table.columns)),

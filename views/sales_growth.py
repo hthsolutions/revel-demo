@@ -1,6 +1,15 @@
+import importlib
+
 import altair as alt
 import pandas as pd
 import streamlit as st
+
+import revel_data
+
+# A deploy can leave the already-imported data module in memory
+# while this page is read fresh from disk.
+if not hasattr(revel_data, "ORDER_TYPE_COLUMNS"):
+    revel_data = importlib.reload(revel_data)
 
 from revel_data import (
     NOT_AVAILABLE,

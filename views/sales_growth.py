@@ -941,11 +941,9 @@ with st.expander("View period breakdown"):
                 "days_counted",
                 "channel",
                 "channel_sales",
+                "previous_channel_sales",
                 "share_percent",
                 "channel_growth",
-                "net_sales",
-                "previous_sales",
-                "sales_change",
             ]
         ],
         use_container_width=True,
@@ -968,6 +966,10 @@ with st.expander("View period breakdown"):
                 "Sales",
                 format="$%,.0f",
             ),
+            "previous_channel_sales": st.column_config.NumberColumn(
+                "Previous period",
+                format="$%,.0f",
+            ),
             "share_percent": st.column_config.NumberColumn(
                 "Share %",
                 format="%.1f%%",
@@ -975,18 +977,6 @@ with st.expander("View period breakdown"):
             "channel_growth": st.column_config.NumberColumn(
                 "Channel growth %",
                 format="%.2f%%",
-            ),
-            "net_sales": st.column_config.NumberColumn(
-                "Net sales",
-                format="$%,.0f",
-            ),
-            "previous_sales": st.column_config.NumberColumn(
-                "Previous period",
-                format="$%,.0f",
-            ),
-            "sales_change": st.column_config.NumberColumn(
-                "Change",
-                format="$%,.0f",
             ),
         },
     )

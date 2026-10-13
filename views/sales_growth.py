@@ -4,33 +4,36 @@ import streamlit as st
 
 from revel_data import (
     NOT_AVAILABLE,
+    ORDER_TYPE_COLUMNS,
     SALES_NUMERIC_COLUMNS,
     MissingSecretError,
-    load_sales_data,
+    load_order_type_sales,
     location_filter_controls,
     percent_change,
 )
 
 
-# Channel dollars reported with net sales. "Other" is added
-# later when these columns add up to less than net sales.
-CHANNEL_COLUMNS = {
-    "drive_through": "Drive Through",
-    "eat_in": "Eat In",
-    "to_go": "To Go",
-    "pickup": "Pickup",
-    "dd_marketplace": "DoorDash Marketplace",
-    "uber_eats": "Uber Eats",
-}
+# Gross sales by Revel order type. Labels match the keys
+# stored in the sales row's raw payload.
+CHANNEL_COLUMNS = ORDER_TYPE_COLUMNS
 
 CHANNEL_COLORS = {
     "Drive Through": "#1f77b4",
     "Eat In": "#2ca02c",
     "To Go": "#17becf",
     "Pickup": "#9467bd",
-    "DoorDash Marketplace": "#d62728",
+    "DD Marketplace": "#d62728",
     "Uber Eats": "#e377c2",
-    "Other": "#c7c7c7",
+    "Catering": "#8c564b",
+    "Delivery": "#bcbd22",
+    "Online Ordering": "#393b79",
+    "Spirit Night": "#7f7f7f",
+    "Shipping": "#aec7e8",
+    "Eat In Fun": "#98df8a",
+    "To Go Fun": "#ffbb78",
+    "Drive Thru Fun": "#c5b0d5",
+    "LANE A": "#c49c94",
+    "LANE B": "#f7b6d2",
 }
 
 GROWTH_COLOR = "#ff7f0e"
@@ -115,6 +118,7 @@ def build_period_frame(
     date_end,
     period_days: int,
     duration: int,
+    extra_columns: list[str] | None = None,
 ) -> pd.DataFrame:
     """Bucket daily sales into equal periods ending on date_end.
 
@@ -129,6 +133,12 @@ def build_period_frame(
     date_end = pd.Timestamp(date_end).normalize()
     period_days = int(period_days)
     duration = int(duration)
+    sum_columns = list(dict.fromkeys(
+        [
+            *SALES_NUMERIC_COLUMNS,
+            *(extra_columns or []),
+        ]
+    ))
 
     working = frame.copy()
     working["business_date"] = pd.to_datetime(
@@ -181,13 +191,18 @@ def build_period_frame(
             {"period_index": pd.Series(dtype="int64")}
         )
     else:
+        present_columns = [
+            column_name
+            for column_name in sum_columns
+            if column_name in scoped.columns
+        ]
         grouped = (
             scoped
             .groupby("period_index", as_index=False)
             .agg(
                 **{
                     column_name: (column_name, "sum")
-                    for column_name in SALES_NUMERIC_COLUMNS
+                    for column_name in present_columns
                 },
                 days_counted=("business_date", "nunique"),
             )
@@ -199,7 +214,7 @@ def build_period_frame(
         how="left",
     )
 
-    for column_name in SALES_NUMERIC_COLUMNS:
+    for column_name in sum_columns:
         if column_name not in calendar.columns:
             calendar[column_name] = NOT_AVAILABLE
 
@@ -211,10 +226,12 @@ def build_period_frame(
     )
 
     missing_period = calendar["days_counted"].eq(0)
-    calendar.loc[
-        missing_period,
-        SALES_NUMERIC_COLUMNS,
-    ] = NOT_AVAILABLE
+    blank_columns = [
+        column_name
+        for column_name in sum_columns
+        if column_name in calendar.columns
+    ]
+    calendar.loc[missing_period, blank_columns] = NOT_AVAILABLE
 
     calendar["is_complete"] = (
         calendar["days_counted"] >= period_days
@@ -286,11 +303,6 @@ def channel_rows(frame: pd.DataFrame) -> pd.DataFrame:
     result so the first visible period has a prior value.
     """
 
-    value_columns = {
-        **CHANNEL_COLUMNS,
-        "other_sales": "Other",
-    }
-
     long_df = frame.melt(
         id_vars=[
             "period_index",
@@ -298,18 +310,16 @@ def channel_rows(frame: pd.DataFrame) -> pd.DataFrame:
             "period_range",
             "period_start",
             "period_end",
-            "net_sales",
-            "previous_sales",
-            "sales_change",
+            "gross_sales",
             "days_counted",
             "is_complete",
         ],
-        value_vars=list(value_columns),
+        value_vars=list(CHANNEL_COLUMNS),
         var_name="channel_key",
         value_name="channel_sales",
     )
 
-    long_df["channel"] = long_df["channel_key"].map(value_columns)
+    long_df["channel"] = long_df["channel_key"].map(CHANNEL_COLUMNS)
 
     previous = long_df[
         ["period_index", "channel_key", "channel_sales"]
@@ -340,7 +350,7 @@ def channel_rows(frame: pd.DataFrame) -> pd.DataFrame:
     )
     long_df["share_percent"] = (
         long_df["channel_sales"]
-        / long_df["net_sales"].replace(0.0, NOT_AVAILABLE)
+        / long_df["gross_sales"].replace(0.0, NOT_AVAILABLE)
         * 100
     )
     # Vega's percent format multiplies by 100, so the tooltip
@@ -402,22 +412,14 @@ def growth_axis_domain(frame: pd.DataFrame) -> tuple[float, float]:
     return raw_min - padding, raw_max + padding
 
 
-def build_trend_chart(
-    period_df: pd.DataFrame,
-    stacked_df: pd.DataFrame,
-    label_order: list[str],
+def period_x_encoding(
     x_title: str,
-    growth_title: str,
-    channel_order: list[str],
-    sales_axis_max: float,
-    growth_axis_min: float,
-    growth_axis_max: float,
+    label_order: list[str],
     label_angle: int,
-) -> alt.Chart:
-    """Stacked channel bars with a growth line on a second axis."""
+) -> alt.X:
+    """Shared period axis for the trend and channel charts."""
 
-    layers = []
-    x_encoding = alt.X(
+    return alt.X(
         "period_label:N",
         title=x_title,
         sort=label_order,
@@ -427,76 +429,76 @@ def build_trend_chart(
         ),
     )
 
-    if not stacked_df.empty:
-        layers.append(
-            alt.Chart(stacked_df)
-            .mark_bar(stroke="white", strokeWidth=0.4)
-            .encode(
-                x=x_encoding,
-                y=alt.Y(
-                    "channel_sales:Q",
-                    title="Net Sales",
-                    stack="zero",
-                    axis=alt.Axis(
-                        format="$,.0f",
-                        titleColor="#1f2937",
-                    ),
-                    scale=alt.Scale(domain=[0, sales_axis_max]),
-                ),
-                color=alt.Color(
-                    "channel:N",
-                    title="Channel",
-                    sort=channel_order,
-                    scale=alt.Scale(
-                        domain=channel_order,
-                        range=[
-                            CHANNEL_COLORS.get(name, "#7f7f7f")
-                            for name in channel_order
-                        ],
-                    ),
-                ),
-                order=alt.Order("stack_rank:Q", sort="ascending"),
-                opacity=alt.condition(
-                    alt.datum.is_complete,
-                    alt.value(0.92),
-                    alt.value(0.4),
-                ),
-                tooltip=[
-                    alt.Tooltip(
-                        "period_range:N",
-                        title="Period",
-                    ),
-                    alt.Tooltip("channel:N", title="Channel"),
-                    alt.Tooltip(
-                        "channel_sales:Q",
-                        title="Channel sales",
-                        format="$,.0f",
-                    ),
-                    alt.Tooltip(
-                        "share_ratio:Q",
-                        title="Share %",
-                        format=".1%",
-                    ),
-                    alt.Tooltip(
-                        "channel_growth:Q",
-                        title="Channel growth (%)",
-                        format="+.2f",
-                    ),
-                    alt.Tooltip(
-                        "days_counted:Q",
-                        title="Days counted",
-                        format=".0f",
-                    ),
-                ],
-            )
-        )
 
+def build_trend_chart(
+    period_df: pd.DataFrame,
+    label_order: list[str],
+    x_title: str,
+    growth_title: str,
+    sales_axis_max: float,
+    growth_axis_min: float,
+    growth_axis_max: float,
+    label_angle: int,
+) -> alt.Chart:
+    """Net sales bars with a growth line and a 0% reference."""
+
+    x_encoding = period_x_encoding(
+        x_title,
+        label_order,
+        label_angle,
+    )
     growth_scale = alt.Scale(
         domain=[growth_axis_min, growth_axis_max],
         zero=False,
     )
 
-    layers.append(
+    net_bars = (
+        alt.Chart(period_df)
+        .mark_bar(color="#1f77b4")
+        .encode(
+            x=x_encoding,
+            y=alt.Y(
+                "net_sales:Q",
+                title="Net Sales",
+                axis=alt.Axis(
+                    format="$,.0f",
+                    titleColor="#1f77b4",
+                ),
+                scale=alt.Scale(domain=[0, sales_axis_max]),
+            ),
+            opacity=alt.condition(
+                alt.datum.is_complete,
+                alt.value(0.85),
+                alt.value(0.4),
+            ),
+            tooltip=[
+                alt.Tooltip("period_range:N", title="Period"),
+                alt.Tooltip(
+                    "net_sales:Q",
+                    title="Net sales",
+                    format="$,.0f",
+                ),
+                alt.Tooltip(
+                    "previous_sales:Q",
+                    title="Previous period",
+                    format="$,.0f",
+                ),
+                alt.Tooltip(
+                    "sales_growth:Q",
+                    title="Growth (%)",
+                    format="+.2f",
+                ),
+                alt.Tooltip(
+                    "days_counted:Q",
+                    title="Days counted",
+                    format=".0f",
+                ),
+            ],
+        )
+    )
+
+    layers = [
+        net_bars,
         alt.Chart(period_df)
         .mark_line(
             color=GROWTH_COLOR,
@@ -539,10 +541,7 @@ def build_trend_chart(
                     format="+.2f",
                 ),
             ],
-        )
-    )
-
-    layers.append(
+        ),
         alt.Chart(pd.DataFrame({"zero_growth": [0.0]}))
         .mark_rule(
             color="#111827",
@@ -555,12 +554,85 @@ def build_trend_chart(
                 axis=None,
                 scale=growth_scale,
             ),
-        )
-    )
+        ),
+    ]
 
     return (
         alt.layer(*layers)
         .resolve_scale(y="independent")
+        .properties(height=440)
+    )
+
+
+def build_channel_chart(
+    stacked_df: pd.DataFrame,
+    label_order: list[str],
+    x_title: str,
+    channel_order: list[str],
+    sales_axis_max: float,
+    label_angle: int,
+) -> alt.Chart:
+    """Stacked gross sales by Revel order type."""
+
+    return (
+        alt.Chart(stacked_df)
+        .mark_bar(stroke="white", strokeWidth=0.4)
+        .encode(
+            x=period_x_encoding(
+                x_title,
+                label_order,
+                label_angle,
+            ),
+            y=alt.Y(
+                "channel_sales:Q",
+                title="Gross Sales",
+                stack="zero",
+                axis=alt.Axis(format="$,.0f"),
+                scale=alt.Scale(domain=[0, sales_axis_max]),
+            ),
+            color=alt.Color(
+                "channel:N",
+                title="Channel",
+                sort=channel_order,
+                scale=alt.Scale(
+                    domain=channel_order,
+                    range=[
+                        CHANNEL_COLORS.get(name, "#7f7f7f")
+                        for name in channel_order
+                    ],
+                ),
+            ),
+            order=alt.Order("stack_rank:Q", sort="ascending"),
+            opacity=alt.condition(
+                alt.datum.is_complete,
+                alt.value(0.92),
+                alt.value(0.4),
+            ),
+            tooltip=[
+                alt.Tooltip("period_range:N", title="Period"),
+                alt.Tooltip("channel:N", title="Channel"),
+                alt.Tooltip(
+                    "channel_sales:Q",
+                    title="Gross sales",
+                    format="$,.0f",
+                ),
+                alt.Tooltip(
+                    "share_ratio:Q",
+                    title="Share of gross %",
+                    format=".1%",
+                ),
+                alt.Tooltip(
+                    "channel_growth:Q",
+                    title="Channel growth (%)",
+                    format="+.2f",
+                ),
+                alt.Tooltip(
+                    "previous_channel_sales:Q",
+                    title="Previous period",
+                    format="$,.0f",
+                ),
+            ],
+        )
         .properties(height=440)
         .configure_legend(orient="bottom", columns=4)
     )
@@ -568,12 +640,13 @@ def build_trend_chart(
 
 st.title("Sales Growth")
 st.caption(
-    "Net sales by channel for a date range you choose, "
-    "compared with the previous day, week, or 30-day month."
+    "Net sales for a date range you choose, compared with "
+    "the previous day, week, or 30-day month. Channel mix "
+    "below is gross sales by order type."
 )
 
 try:
-    sales_df = load_sales_data()
+    sales_df = load_order_type_sales()
 except MissingSecretError as error:
     st.error(str(error))
     st.stop()
@@ -692,22 +765,11 @@ period_df = build_period_frame(
     date_end,
     period_days,
     duration,
+    extra_columns=list(CHANNEL_COLUMNS),
 )
 
 # period_index 0 is the bucket that ends on Date end.
 # The highest index is the hidden comparison baseline.
-period_df["channel_total"] = period_df[list(CHANNEL_COLUMNS)].sum(
-    axis=1,
-    min_count=1,
-)
-period_df["other_sales"] = (
-    period_df["net_sales"] - period_df["channel_total"]
-)
-period_df.loc[
-    period_df["other_sales"] <= 0.50,
-    "other_sales",
-] = NOT_AVAILABLE
-
 visible = period_df[
     period_df["period_index"] < duration
 ].copy()
@@ -815,11 +877,53 @@ if not bool(current["is_complete"]):
 
 st.subheader("Trend and Growth")
 
+net_peak = float(visible["net_sales"].max())
+
+if pd.isna(net_peak) or net_peak <= 0:
+    sales_axis_max = 1.0
+else:
+    sales_axis_max = net_peak * 1.05
+
+growth_axis_min, growth_axis_max = growth_axis_domain(visible)
+
+label_order = (
+    visible
+    .sort_values("period_end")["period_label"]
+    .tolist()
+)
+label_angle = -40 if duration > 6 else 0
+period_chart_df = visible.sort_values("period_end")
+
+trend_chart = build_trend_chart(
+    period_chart_df,
+    label_order,
+    interval["x_title"],
+    interval["growth_title"],
+    sales_axis_max,
+    growth_axis_min,
+    growth_axis_max,
+    label_angle,
+)
+
+st.altair_chart(trend_chart, use_container_width=True)
+
+st.caption(
+    "Blue bars are net sales. The orange line is net sales "
+    "growth versus the previous period, and the dashed line "
+    "is 0%."
+)
+
+
+# ---------------------------------------------------------
+# Channel mix
+# ---------------------------------------------------------
+
+st.subheader("Channel Mix Trend")
+
 stacked_df = stack_channel_sales(period_df, duration)
 
 if stacked_df.empty:
-    channel_order = []
-    sales_peak = 0.0
+    st.info("No gross sales by order type fall in that range.")
 else:
     channel_order = (
         stacked_df
@@ -829,66 +933,30 @@ else:
         .index
         .tolist()
     )
-    sales_peak = float(
+    gross_peak = float(
         stacked_df
         .groupby("period_label")["channel_sales"]
         .sum()
         .max()
     )
+    if pd.isna(gross_peak) or gross_peak <= 0:
+        gross_axis_max = 1.0
+    else:
+        gross_axis_max = gross_peak * 1.05
 
-if pd.isna(sales_peak) or sales_peak <= 0:
-    sales_axis_max = 1.0
-else:
-    sales_axis_max = sales_peak * 1.05
-
-growth_axis_min, growth_axis_max = growth_axis_domain(visible)
-
-label_order = (
-    visible
-    .sort_values("period_end")["period_label"]
-    .tolist()
-)
-
-trend_chart = build_trend_chart(
-    visible.sort_values("period_end"),
-    stacked_df,
-    label_order,
-    interval["x_title"],
-    interval["growth_title"],
-    channel_order,
-    sales_axis_max,
-    growth_axis_min,
-    growth_axis_max,
-    label_angle=-40 if duration > 6 else 0,
-)
-
-st.altair_chart(trend_chart, use_container_width=True)
-
-st.caption(
-    "Each bar stacks channel net sales, with that period's "
-    "largest channel at the bottom. Hover a segment for that "
-    "channel's share and its growth versus the previous "
-    "period. The orange line is net sales growth, and the "
-    "dashed line is 0%."
-)
-
-channels_exceed_net = (
-    visible["channel_total"].fillna(0)
-    > visible["net_sales"].fillna(0) + 0.5
-).any()
-
-if channels_exceed_net:
-    st.caption(
-        "On some periods the reported channels add up to "
-        "more than net sales, so those bars are taller than "
-        "net sales. Other fills the gap when the channels "
-        "add up to less."
+    channel_chart = build_channel_chart(
+        stacked_df,
+        label_order,
+        interval["x_title"],
+        channel_order,
+        gross_axis_max,
+        label_angle,
     )
-elif visible["other_sales"].notna().any():
+    st.altair_chart(channel_chart, use_container_width=True)
     st.caption(
-        "Other is the gap between reported channel sales "
-        "and net sales. Revel reports channels independently, "
-        "so shares do not always total exactly 100%."
+        "Each bar stacks gross sales by order type, with "
+        "that period's largest channel at the bottom. "
+        "Share is the channel's portion of gross sales."
     )
 
 incomplete_labels = (
@@ -916,13 +984,12 @@ with st.expander("View period breakdown"):
     breakdown = channel_rows(period_df)
     breakdown = breakdown.loc[
         (breakdown["period_index"] < duration)
-        & ~(
-            breakdown["channel"].eq("Other")
-            & breakdown["channel_sales"].isna()
-        )
         & (
-            breakdown["net_sales"].notna()
-            | breakdown["channel_sales"].notna()
+            breakdown["channel_sales"].fillna(0).abs().gt(0.005)
+            | breakdown["previous_channel_sales"]
+            .fillna(0)
+            .abs()
+            .gt(0.005)
         )
     ].copy()
     breakdown = breakdown.sort_values(
@@ -935,7 +1002,7 @@ with st.expander("View period breakdown"):
 
     channel_options = [
         label
-        for label in [*CHANNEL_COLUMNS.values(), "Other"]
+        for label in CHANNEL_COLUMNS.values()
         if label in set(breakdown["channel"].dropna())
     ]
     channel_filter_key = "sales_growth_breakdown_channels"
@@ -992,7 +1059,7 @@ with st.expander("View period breakdown"):
                 "Channel",
             ),
             "channel_sales": st.column_config.NumberColumn(
-                "Sales",
+                "Gross sales",
                 format="$%,.0f",
             ),
             "previous_channel_sales": st.column_config.NumberColumn(
@@ -1000,7 +1067,7 @@ with st.expander("View period breakdown"):
                 format="$%,.0f",
             ),
             "share_percent": st.column_config.NumberColumn(
-                "Share %",
+                "Share of gross %",
                 format="%.1f%%",
             ),
             "channel_growth": st.column_config.NumberColumn(

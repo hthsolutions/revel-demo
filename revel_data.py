@@ -51,6 +51,28 @@ SALES_NUMERIC_COLUMNS = [
     "uber_eats",
 ]
 
+# Revel order types stored on each row's raw_data payload.
+# The label is the JSON key. These amounts are gross sales,
+# and together they add up to gross_sales.
+ORDER_TYPE_COLUMNS = {
+    "to_go": "To Go",
+    "eat_in": "Eat In",
+    "delivery": "Delivery",
+    "catering": "Catering",
+    "drive_through": "Drive Through",
+    "online_ordering": "Online Ordering",
+    "spirit_night": "Spirit Night",
+    "shipping": "Shipping",
+    "pickup": "Pickup",
+    "dd_marketplace": "DD Marketplace",
+    "uber_eats": "Uber Eats",
+    "eat_in_fun": "Eat In Fun",
+    "to_go_fun": "To Go Fun",
+    "drive_thru_fun": "Drive Thru Fun",
+    "lane_a": "LANE A",
+    "lane_b": "LANE B",
+}
+
 SHIFT_NUMERIC_COLUMNS = [
     "hours",
     "regular_hours",
@@ -216,6 +238,84 @@ def load_sales_data() -> pd.DataFrame:
     dataframe[supporting_columns] = (
         dataframe[supporting_columns].fillna(0.0)
     )
+
+    return dataframe.sort_values("business_date")
+
+
+def _parse_raw_record(value) -> dict:
+    """Turn a raw_data cell into a dictionary."""
+
+    if isinstance(value, dict):
+        return value
+
+    if isinstance(value, str) and value.strip():
+        parsed = json.loads(value)
+        if isinstance(parsed, dict):
+            return parsed
+
+    return {}
+
+
+def _raw_amount(raw: dict, key: str) -> float:
+    """Read one order-type amount from a raw sales payload."""
+
+    value = raw.get(key)
+
+    if value is None or value == "":
+        return 0.0
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+@st.cache_data(ttl=300)
+def load_order_type_sales() -> pd.DataFrame:
+    """Daily net sales, gross sales, and gross sales by order type.
+
+    The order-type amounts are not separate table columns.
+    Revel stores them in raw_data, and their sum is gross sales.
+    """
+
+    dataframe = fetch_table(
+        SALES_TABLE,
+        [
+            "id",
+            "location",
+            "business_date",
+            "net_sales",
+            "gross_sales",
+            "raw_data",
+        ],
+        "business_date",
+    )
+
+    if dataframe.empty:
+        return dataframe
+
+    dataframe["business_date"] = pd.to_datetime(
+        dataframe["business_date"],
+        errors="coerce",
+    )
+    dataframe = _coerce_numeric(
+        dataframe,
+        ["net_sales", "gross_sales"],
+    )
+    dataframe = _add_location_key(dataframe)
+    dataframe = dataframe.dropna(
+        subset=["business_date", "net_sales"],
+    )
+
+    parsed = dataframe["raw_data"].map(_parse_raw_record)
+
+    for column_name, label in ORDER_TYPE_COLUMNS.items():
+        dataframe[column_name] = parsed.map(
+            lambda raw, key=label: _raw_amount(raw, key)
+        )
+
+    dataframe = dataframe.drop(columns=["raw_data"])
+    dataframe["gross_sales"] = dataframe["gross_sales"].fillna(0.0)
 
     return dataframe.sort_values("business_date")
 

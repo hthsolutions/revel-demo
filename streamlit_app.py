@@ -16,6 +16,11 @@ navigation = st.navigation(
             default=True,
         ),
         st.Page(
+            "views/sales_growth.py",
+            title="Sales Growth",
+            icon="📊",
+        ),
+        st.Page(
             "views/labor_percentage.py",
             title="Labor % of Net Sales",
             icon="🧾",

@@ -933,6 +933,35 @@ with st.expander("View period breakdown"):
     breakdown["period_start"] = breakdown["period_start"].dt.date
     breakdown["period_end"] = breakdown["period_end"].dt.date
 
+    channel_options = [
+        label
+        for label in [*CHANNEL_COLUMNS.values(), "Other"]
+        if label in set(breakdown["channel"].dropna())
+    ]
+    channel_filter_key = "sales_growth_breakdown_channels"
+
+    if channel_filter_key not in st.session_state:
+        st.session_state[channel_filter_key] = channel_options
+    else:
+        st.session_state[channel_filter_key] = [
+            channel
+            for channel in st.session_state[channel_filter_key]
+            if channel in channel_options
+        ]
+
+    selected_channels = st.multiselect(
+        "Channel",
+        options=channel_options,
+        key=channel_filter_key,
+        placeholder="Select a channel",
+    )
+    breakdown = breakdown[
+        breakdown["channel"].isin(selected_channels)
+    ]
+
+    if not selected_channels:
+        st.caption("Select a channel to see its rows.")
+
     st.dataframe(
         breakdown[
             [

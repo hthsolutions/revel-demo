@@ -6,7 +6,6 @@ from revel_data import (
     NOT_AVAILABLE,
     SALES_NUMERIC_COLUMNS,
     MissingSecretError,
-    format_metric_value,
     load_sales_data,
     location_filter_controls,
     percent_change,
@@ -68,6 +67,18 @@ INTERVALS = {
         "duration_label": "Duration (months)",
     },
 }
+
+
+def format_dollars(value) -> str:
+    """Nearest dollar, with a thousands separator."""
+
+    if value is None or pd.isna(value):
+        return "—"
+
+    rounded = int(round(float(value)))
+    sign = "-" if rounded < 0 else ""
+
+    return f"{sign}${abs(rounded):,}"
 
 
 def format_period_label(start, end, period_days: int, include_year: bool) -> str:
@@ -312,6 +323,14 @@ def stack_channel_sales(frame: pd.DataFrame) -> pd.DataFrame:
         .groupby("period_end", sort=False)["channel_sales"]
         .rank(ascending=False, method="first")
     )
+    long_df["share_percent"] = (
+        long_df["channel_sales"]
+        / long_df["net_sales"].replace(0.0, NOT_AVAILABLE)
+        * 100
+    )
+    # Vega's percent format multiplies by 100, so the tooltip
+    # uses the 0–1 ratio and still reads as a percent.
+    long_df["share_ratio"] = long_df["share_percent"] / 100
 
     return long_df.sort_values(
         ["period_end", "stack_rank"],
@@ -353,10 +372,10 @@ def build_trend_chart(
         "period_label:N",
         title=x_title,
         sort=label_order,
-                axis=alt.Axis(
-                    labelAngle=label_angle,
-                    labelOverlap="greedy",
-                ),
+        axis=alt.Axis(
+            labelAngle=label_angle,
+            labelOverlap="greedy",
+        ),
     )
 
     if not stacked_df.empty:
@@ -402,12 +421,17 @@ def build_trend_chart(
                     alt.Tooltip(
                         "channel_sales:Q",
                         title="Channel sales",
-                        format="$,.2f",
+                        format="$,.0f",
+                    ),
+                    alt.Tooltip(
+                        "share_ratio:Q",
+                        title="Share %",
+                        format=".1%",
                     ),
                     alt.Tooltip(
                         "net_sales:Q",
                         title="Net sales",
-                        format="$,.2f",
+                        format="$,.0f",
                     ),
                     alt.Tooltip(
                         "sales_growth:Q",
@@ -458,12 +482,12 @@ def build_trend_chart(
                 alt.Tooltip(
                     "net_sales:Q",
                     title="Net sales",
-                    format="$,.2f",
+                    format="$,.0f",
                 ),
                 alt.Tooltip(
                     "previous_sales:Q",
                     title="Previous period",
-                    format="$,.2f",
+                    format="$,.0f",
                 ),
                 alt.Tooltip(
                     "sales_growth:Q",
@@ -477,9 +501,9 @@ def build_trend_chart(
     layers.append(
         alt.Chart(pd.DataFrame({"zero_growth": [0.0]}))
         .mark_rule(
-            color="#6b7280",
-            strokeWidth=2,
-            strokeDash=[5, 5],
+            color="#111827",
+            strokeWidth=3,
+            strokeDash=[8, 4],
         )
         .encode(
             y=alt.Y(
@@ -689,7 +713,7 @@ summary_columns = st.columns(4)
 
 summary_columns[0].metric(
     "Selected period",
-    format_metric_value(current["net_sales"], "currency"),
+    format_dollars(current["net_sales"]),
     help=(
         f"{current['period_range']} "
         f"({int(current['days_counted'])} of "
@@ -708,13 +732,13 @@ if previous is not None:
 
 summary_columns[1].metric(
     "Previous period",
-    format_metric_value(current["previous_sales"], "currency"),
+    format_dollars(current["previous_sales"]),
     help=previous_help,
 )
 
 summary_columns[2].metric(
     "Change",
-    format_metric_value(current["sales_change"], "currency"),
+    format_dollars(current["sales_change"]),
 )
 
 growth_has_value = not pd.isna(current_growth)
@@ -842,73 +866,108 @@ if incomplete_labels:
 # ---------------------------------------------------------
 
 with st.expander("View period breakdown"):
-    breakdown = visible.sort_values(
-        "period_end",
-        ascending=False,
-    ).copy()
+    # One row per channel per period, instead of one column
+    # per channel. Other is omitted when there is no gap.
+    channel_fields = {
+        **CHANNEL_COLUMNS,
+        "other_sales": "Other",
+    }
+    breakdown = visible.melt(
+        id_vars=[
+            "period_start",
+            "period_end",
+            "days_counted",
+            "net_sales",
+            "previous_sales",
+            "sales_change",
+            "sales_growth",
+        ],
+        value_vars=list(channel_fields),
+        var_name="channel_key",
+        value_name="channel_sales",
+    )
+    breakdown["channel"] = breakdown["channel_key"].map(
+        channel_fields
+    )
+    breakdown = breakdown.loc[
+        ~(
+            breakdown["channel"].eq("Other")
+            & breakdown["channel_sales"].isna()
+        )
+        & (
+            breakdown["net_sales"].notna()
+            | breakdown["channel_sales"].notna()
+        )
+    ].copy()
+    breakdown["share_percent"] = (
+        breakdown["channel_sales"]
+        / breakdown["net_sales"].replace(0.0, NOT_AVAILABLE)
+        * 100
+    )
+    breakdown = breakdown.sort_values(
+        ["period_end", "channel_sales"],
+        ascending=[False, False],
+        na_position="last",
+    )
     breakdown["period_start"] = breakdown["period_start"].dt.date
     breakdown["period_end"] = breakdown["period_end"].dt.date
 
-    breakdown_columns = [
-        "period_start",
-        "period_end",
-        "days_counted",
-        "net_sales",
-        "previous_sales",
-        "sales_change",
-        "sales_growth",
-        *CHANNEL_COLUMNS.keys(),
-    ]
-
-    if breakdown["other_sales"].notna().any():
-        breakdown_columns.append("other_sales")
-
-    column_config = {
-        "period_start": st.column_config.DateColumn(
-            "Period start",
-        ),
-        "period_end": st.column_config.DateColumn(
-            "Period end",
-        ),
-        "days_counted": st.column_config.NumberColumn(
-            "Days counted",
-            format="%d",
-        ),
-        "net_sales": st.column_config.NumberColumn(
-            "Net sales",
-            format="$%.2f",
-        ),
-        "previous_sales": st.column_config.NumberColumn(
-            "Previous period",
-            format="$%.2f",
-        ),
-        "sales_change": st.column_config.NumberColumn(
-            "Change",
-            format="$%.2f",
-        ),
-        "sales_growth": st.column_config.NumberColumn(
-            "Growth %",
-            format="%.2f%%",
-        ),
-        "other_sales": st.column_config.NumberColumn(
-            "Other",
-            format="$%.2f",
-        ),
-    }
-
-    for column_name, channel_label in CHANNEL_COLUMNS.items():
-        column_config[column_name] = (
-            st.column_config.NumberColumn(
-                channel_label,
-                format="$%.2f",
-            )
-        )
-
     st.dataframe(
-        breakdown[breakdown_columns],
+        breakdown[
+            [
+                "period_start",
+                "period_end",
+                "days_counted",
+                "channel",
+                "channel_sales",
+                "share_percent",
+                "net_sales",
+                "previous_sales",
+                "sales_change",
+                "sales_growth",
+            ]
+        ],
         use_container_width=True,
         hide_index=True,
-        column_config=column_config,
+        column_config={
+            "period_start": st.column_config.DateColumn(
+                "Period start",
+            ),
+            "period_end": st.column_config.DateColumn(
+                "Period end",
+            ),
+            "days_counted": st.column_config.NumberColumn(
+                "Days counted",
+                format="%d",
+            ),
+            "channel": st.column_config.TextColumn(
+                "Channel",
+            ),
+            "channel_sales": st.column_config.NumberColumn(
+                "Sales",
+                format="$%,.0f",
+            ),
+            "share_percent": st.column_config.NumberColumn(
+                "Share %",
+                format="%.1f%%",
+            ),
+            "net_sales": st.column_config.NumberColumn(
+                "Net sales",
+                format="$%,.0f",
+            ),
+            "previous_sales": st.column_config.NumberColumn(
+                "Previous period",
+                format="$%,.0f",
+            ),
+            "sales_change": st.column_config.NumberColumn(
+                "Change",
+                format="$%,.0f",
+            ),
+            "sales_growth": st.column_config.NumberColumn(
+                "Growth %",
+                format="%.2f%%",
+            ),
+        },
     )
 
 

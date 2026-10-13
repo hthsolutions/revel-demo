@@ -278,12 +278,12 @@ def build_period_frame(
     return calendar.sort_values("period_index").reset_index(drop=True)
 
 
-def stack_channel_sales(frame: pd.DataFrame) -> pd.DataFrame:
-    """One row per channel so each period can be a stacked bar.
+def channel_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    """One row per channel per period, including the baseline.
 
-    stack_rank 1 is that period's largest channel. The chart
-    draws ascending rank from the baseline, which puts the
-    largest channel on the bottom and the smallest on top.
+    channel_growth compares a channel with the same channel in
+    the previous period. The baseline period stays in the
+    result so the first visible period has a prior value.
     """
 
     value_columns = {
@@ -293,12 +293,14 @@ def stack_channel_sales(frame: pd.DataFrame) -> pd.DataFrame:
 
     long_df = frame.melt(
         id_vars=[
+            "period_index",
             "period_label",
             "period_range",
+            "period_start",
             "period_end",
             "net_sales",
             "previous_sales",
-            "sales_growth",
+            "sales_change",
             "days_counted",
             "is_complete",
         ],
@@ -308,6 +310,61 @@ def stack_channel_sales(frame: pd.DataFrame) -> pd.DataFrame:
     )
 
     long_df["channel"] = long_df["channel_key"].map(value_columns)
+
+    previous = long_df[
+        ["period_index", "channel_key", "channel_sales"]
+    ].rename(
+        columns={
+            "period_index": "previous_index",
+            "channel_sales": "previous_channel_sales",
+        }
+    )
+    long_df["previous_index"] = long_df["period_index"] + 1
+    long_df = long_df.merge(
+        previous,
+        on=["previous_index", "channel_key"],
+        how="left",
+    )
+    long_df = long_df.drop(columns=["previous_index"])
+
+    long_df["channel_growth"] = (
+        (
+            long_df["channel_sales"]
+            - long_df["previous_channel_sales"]
+        )
+        / long_df["previous_channel_sales"].abs()
+        * 100
+    ).replace(
+        [float("inf"), float("-inf")],
+        NOT_AVAILABLE,
+    )
+    long_df["share_percent"] = (
+        long_df["channel_sales"]
+        / long_df["net_sales"].replace(0.0, NOT_AVAILABLE)
+        * 100
+    )
+    # Vega's percent format multiplies by 100, so the tooltip
+    # uses the 0–1 ratio and still reads as a percent.
+    long_df["share_ratio"] = long_df["share_percent"] / 100
+
+    return long_df
+
+
+def stack_channel_sales(
+    frame: pd.DataFrame,
+    duration: int,
+) -> pd.DataFrame:
+    """Visible channel rows for the stacked bars.
+
+    stack_rank 1 is that period's largest channel. The chart
+    draws ascending rank from the baseline, which puts the
+    largest channel on the bottom and the smallest on top.
+    """
+
+    long_df = channel_rows(frame)
+    long_df = long_df.loc[
+        long_df["period_index"] < duration
+    ].copy()
     long_df = long_df[
         long_df["channel_sales"].notna()
         & long_df["channel_sales"].abs().gt(0.005)
@@ -323,14 +380,6 @@ def stack_channel_sales(frame: pd.DataFrame) -> pd.DataFrame:
         .groupby("period_end", sort=False)["channel_sales"]
         .rank(ascending=False, method="first")
     )
-    long_df["share_percent"] = (
-        long_df["channel_sales"]
-        / long_df["net_sales"].replace(0.0, NOT_AVAILABLE)
-        * 100
-    )
-    # Vega's percent format multiplies by 100, so the tooltip
-    # uses the 0–1 ratio and still reads as a percent.
-    long_df["share_ratio"] = long_df["share_percent"] / 100
 
     return long_df.sort_values(
         ["period_end", "stack_rank"],
@@ -429,13 +478,8 @@ def build_trend_chart(
                         format=".1%",
                     ),
                     alt.Tooltip(
-                        "net_sales:Q",
-                        title="Net sales",
-                        format="$,.0f",
-                    ),
-                    alt.Tooltip(
-                        "sales_growth:Q",
-                        title="Growth (%)",
+                        "channel_growth:Q",
+                        title="Channel growth (%)",
                         format="+.2f",
                     ),
                     alt.Tooltip(
@@ -652,21 +696,21 @@ period_df = build_period_frame(
 
 # period_index 0 is the bucket that ends on Date end.
 # The highest index is the hidden comparison baseline.
-visible = period_df[
-    period_df["period_index"] < duration
-].copy()
-
-visible["channel_total"] = visible[list(CHANNEL_COLUMNS)].sum(
+period_df["channel_total"] = period_df[list(CHANNEL_COLUMNS)].sum(
     axis=1,
     min_count=1,
 )
-visible["other_sales"] = (
-    visible["net_sales"] - visible["channel_total"]
+period_df["other_sales"] = (
+    period_df["net_sales"] - period_df["channel_total"]
 )
-visible.loc[
-    visible["other_sales"] <= 0.50,
+period_df.loc[
+    period_df["other_sales"] <= 0.50,
     "other_sales",
 ] = NOT_AVAILABLE
+
+visible = period_df[
+    period_df["period_index"] < duration
+].copy()
 
 window_start = pd.Timestamp(
     visible.loc[visible["period_index"].idxmax(), "period_start"]
@@ -771,7 +815,7 @@ if not bool(current["is_complete"]):
 
 st.subheader("Trend and Growth")
 
-stacked_df = stack_channel_sales(visible)
+stacked_df = stack_channel_sales(period_df, duration)
 
 if stacked_df.empty:
     channel_order = []
@@ -822,8 +866,9 @@ st.altair_chart(trend_chart, use_container_width=True)
 
 st.caption(
     "Each bar stacks channel net sales, with that period's "
-    "largest channel at the bottom. The orange line is net "
-    "sales growth against the previous period, and the "
+    "largest channel at the bottom. Hover a segment for that "
+    "channel's share and its growth versus the previous "
+    "period. The orange line is net sales growth, and the "
     "dashed line is 0%."
 )
 
@@ -868,29 +913,10 @@ if incomplete_labels:
 with st.expander("View period breakdown"):
     # One row per channel per period, instead of one column
     # per channel. Other is omitted when there is no gap.
-    channel_fields = {
-        **CHANNEL_COLUMNS,
-        "other_sales": "Other",
-    }
-    breakdown = visible.melt(
-        id_vars=[
-            "period_start",
-            "period_end",
-            "days_counted",
-            "net_sales",
-            "previous_sales",
-            "sales_change",
-            "sales_growth",
-        ],
-        value_vars=list(channel_fields),
-        var_name="channel_key",
-        value_name="channel_sales",
-    )
-    breakdown["channel"] = breakdown["channel_key"].map(
-        channel_fields
-    )
+    breakdown = channel_rows(period_df)
     breakdown = breakdown.loc[
-        ~(
+        (breakdown["period_index"] < duration)
+        & ~(
             breakdown["channel"].eq("Other")
             & breakdown["channel_sales"].isna()
         )
@@ -899,11 +925,6 @@ with st.expander("View period breakdown"):
             | breakdown["channel_sales"].notna()
         )
     ].copy()
-    breakdown["share_percent"] = (
-        breakdown["channel_sales"]
-        / breakdown["net_sales"].replace(0.0, NOT_AVAILABLE)
-        * 100
-    )
     breakdown = breakdown.sort_values(
         ["period_end", "channel_sales"],
         ascending=[False, False],
@@ -921,10 +942,10 @@ with st.expander("View period breakdown"):
                 "channel",
                 "channel_sales",
                 "share_percent",
+                "channel_growth",
                 "net_sales",
                 "previous_sales",
                 "sales_change",
-                "sales_growth",
             ]
         ],
         use_container_width=True,
@@ -951,6 +972,10 @@ with st.expander("View period breakdown"):
                 "Share %",
                 format="%.1f%%",
             ),
+            "channel_growth": st.column_config.NumberColumn(
+                "Channel growth %",
+                format="%.2f%%",
+            ),
             "net_sales": st.column_config.NumberColumn(
                 "Net sales",
                 format="$%,.0f",
@@ -962,10 +987,6 @@ with st.expander("View period breakdown"):
             "sales_change": st.column_config.NumberColumn(
                 "Change",
                 format="$%,.0f",
-            ),
-            "sales_growth": st.column_config.NumberColumn(
-                "Growth %",
-                format="%.2f%%",
             ),
         },
     )

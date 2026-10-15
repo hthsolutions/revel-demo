@@ -30,6 +30,7 @@ INTERVALS = {
         "unit": "days",
         "x_title": "Business date",
         "duration_label": "Duration (days)",
+        "summary_title": "Selected Day vs Previous Day",
     },
     "Weekly": {
         "days": 7,
@@ -38,6 +39,7 @@ INTERVALS = {
         "unit": "weeks",
         "x_title": "Week",
         "duration_label": "Duration (weeks)",
+        "summary_title": "Selected Week vs Previous Week",
     },
     "Monthly": {
         "days": 30,
@@ -46,6 +48,7 @@ INTERVALS = {
         "unit": "months",
         "x_title": "30-day period",
         "duration_label": "Duration (months)",
+        "summary_title": "Selected Month vs Previous Month",
     },
 }
 
@@ -297,6 +300,11 @@ def build_labor_period_frame(
     date_end = pd.Timestamp(date_end).normalize()
     period_days = int(period_days)
     duration = int(duration)
+    sum_columns = [
+        column_name
+        for column_name in [*PERIOD_SUM_COLUMNS, "labor_hours"]
+        if column_name in frame.columns
+    ]
 
     working = frame.copy()
     working["business_date"] = pd.to_datetime(
@@ -354,7 +362,7 @@ def build_labor_period_frame(
             .agg(
                 **{
                     column_name: (column_name, "sum")
-                    for column_name in PERIOD_SUM_COLUMNS
+                    for column_name in sum_columns
                 },
                 days_counted=("business_date", "nunique"),
             )
@@ -366,7 +374,7 @@ def build_labor_period_frame(
         how="left",
     )
 
-    for column_name in PERIOD_SUM_COLUMNS:
+    for column_name in sum_columns:
         if column_name not in calendar.columns:
             calendar[column_name] = NOT_AVAILABLE
 
@@ -378,9 +386,13 @@ def build_labor_period_frame(
     )
 
     missing_period = calendar["days_counted"].eq(0)
-    calendar.loc[missing_period, PERIOD_SUM_COLUMNS] = (
-        NOT_AVAILABLE
-    )
+    calendar.loc[missing_period, sum_columns] = NOT_AVAILABLE
+
+    if "labor_hours" in calendar.columns:
+        calendar["sales_per_labor_hour"] = safe_ratio(
+            calendar["net_sales"],
+            calendar["labor_hours"],
+        )
 
     calendar["is_complete"] = (
         calendar["days_counted"] >= period_days
@@ -667,7 +679,8 @@ selected_interval = st.sidebar.selectbox(
     help=(
         "Periods are counted backward from Date end. "
         "A week is 7 days and a month is 30 days. "
-        "This sets the Labor Dollars and Labor Rate chart."
+        "This sets the summary metrics and the "
+        "Labor Dollars and Labor Rate chart."
     ),
 )
 
@@ -693,7 +706,10 @@ date_end = st.sidebar.date_input(
     min_value=min_date,
     max_value=max_date,
     key=date_key,
-    help="Last business date included in the labor rate chart.",
+    help=(
+        "Last business date included in the summary "
+        "and the labor rate chart."
+    ),
 )
 
 duration = st.sidebar.number_input(
@@ -1036,179 +1052,203 @@ previous_week = (
 
 
 # ---------------------------------------------------------
-# Week-over-week summary
+# Selected period vs the period before it
 # ---------------------------------------------------------
 
-current_week_label = (
-    f"{current_week['week_start']:%b %d}–"
-    f"{current_week['week_start'] + timedelta(days=6):%b %d, %Y}"
-)
+st.subheader(interval["summary_title"])
 
-st.subheader("Current Week vs Previous Week")
 
-labor_percent_change = current_week["labor_percent_change"]
+def period_coverage(row) -> str:
+    """Date range and how many days of that bucket reported."""
 
-summary_columns = st.columns(4)
+    return (
+        f"{row['period_range']} "
+        f"({int(row['days_counted'])} of {period_days} days)"
+    )
 
-summary_columns[0].metric(
-    "Labor % of Net Sales",
-    format_metric_value(
-        current_week["labor_percent"],
+
+def period_delta(current_value, previous_row, column_name):
+    """Signed percent change against the previous period."""
+
+    if previous_row is None:
+        return None
+
+    change = percent_change(
+        current_value,
+        previous_row[column_name],
+    )
+
+    if pd.isna(change):
+        return None
+
+    return f"{change:+.2f}%"
+
+
+if date_end is None:
+    st.warning("Pick a date end.")
+    summary_current = None
+    summary_previous = None
+else:
+    summary_df = build_labor_period_frame(
+        labor_df,
+        date_end,
+        period_days,
+        2,
+    )
+    summary_current = summary_df.loc[
+        summary_df["period_index"] == 0
+    ].iloc[0]
+    previous_rows = summary_df.loc[
+        summary_df["period_index"] == 1
+    ]
+    summary_previous = (
+        previous_rows.iloc[0]
+        if not previous_rows.empty
+        else None
+    )
+
+if summary_current is not None:
+    current_coverage = period_coverage(summary_current)
+    labor_percent_change = NOT_AVAILABLE
+
+    if (
+        summary_previous is not None
+        and not pd.isna(summary_current["labor_percent"])
+        and not pd.isna(summary_previous["labor_percent"])
+    ):
+        labor_percent_change = (
+            summary_current["labor_percent"]
+            - summary_previous["labor_percent"]
+        )
+
+    summary_columns = st.columns(4)
+
+    summary_columns[0].metric(
+        "Labor % of Net Sales",
+        format_metric_value(
+            summary_current["labor_percent"],
+            "percent",
+        ),
+        delta=(
+            f"{labor_percent_change:+.2f} pts"
+            if not pd.isna(labor_percent_change)
+            else None
+        ),
+        # A falling labor rate is a good outcome.
+        delta_color="inverse",
+        help=current_coverage,
+    )
+
+    summary_columns[1].metric(
+        "Total Labor",
+        format_whole_dollars(summary_current["total_labor"]),
+        delta=period_delta(
+            summary_current["total_labor"],
+            summary_previous,
+            "total_labor",
+        ),
+        delta_color="inverse",
+        help=current_coverage,
+    )
+
+    summary_columns[2].metric(
+        "Net Sales",
+        format_whole_dollars(summary_current["net_sales"]),
+        delta=period_delta(
+            summary_current["net_sales"],
+            summary_previous,
+            "net_sales",
+        ),
+        help=current_coverage,
+    )
+
+    summary_columns[3].metric(
+        "SpLH",
+        format_whole_dollars(
+            summary_current["sales_per_labor_hour"]
+        ),
+        delta=period_delta(
+            summary_current["sales_per_labor_hour"],
+            summary_previous,
+            "sales_per_labor_hour",
+        ),
+        help=(
+            f"{current_coverage}. Net sales divided by "
+            "hourly shift hours. GM, DM, and other "
+            "salaried roles are excluded."
+        ),
+    )
+
+    previous_labor_percent = (
+        summary_previous["labor_percent"]
+        if summary_previous is not None
+        else NOT_AVAILABLE
+    )
+    previous_label = format_metric_value(
+        previous_labor_percent,
         "percent",
-    ),
-    delta=(
-        f"{labor_percent_change:+.2f} pts"
-        if not pd.isna(labor_percent_change)
-        else None
-    ),
-    # A falling labor rate is a good outcome.
-    delta_color="inverse",
-    help=f"Week of {current_week_label}",
-)
-
-summary_columns[1].metric(
-    "Total Labor",
-    format_whole_dollars(current_week["total_labor"]),
-    delta=(
-        f"{percent_change(current_week['total_labor'], previous_week['total_labor']):+.2f}%"
-        if previous_week is not None
-        and not pd.isna(
-            percent_change(
-                current_week["total_labor"],
-                previous_week["total_labor"],
-            )
-        )
-        else None
-    ),
-    delta_color="inverse",
-)
-
-summary_columns[2].metric(
-    "Net Sales",
-    format_whole_dollars(current_week["net_sales"]),
-    delta=(
-        f"{percent_change(current_week['net_sales'], previous_week['net_sales']):+.2f}%"
-        if previous_week is not None
-        and not pd.isna(
-            percent_change(
-                current_week["net_sales"],
-                previous_week["net_sales"],
-            )
-        )
-        else None
-    ),
-)
-
-summary_columns[3].metric(
-    "SpLH",
-    format_whole_dollars(current_week["sales_per_labor_hour"]),
-    delta=(
-        f"{percent_change(current_week['sales_per_labor_hour'], previous_week['sales_per_labor_hour']):+.2f}%"
-        if previous_week is not None
-        and not pd.isna(
-            percent_change(
-                current_week["sales_per_labor_hour"],
-                previous_week["sales_per_labor_hour"],
-            )
-        )
-        else None
-    ),
-    help=(
-        "Net sales divided by hourly shift hours. "
-        "GM, DM, and other salaried roles are excluded."
-    ),
-)
-
-previous_label = format_metric_value(
-    current_week["previous_labor_percent"],
-    "percent",
-)
-
-hourly_label = format_whole_dollars(
-    current_week["hourly_labor"]
-)
-
-gm_label = format_whole_dollars(current_week["gm_labor"])
-
-dm_label = format_whole_dollars(current_week["dm_labor"])
-
-current_hourly_percent = format_metric_value(
-    percent_of_sales(
-        current_week["hourly_labor"],
-        current_week["net_sales"],
-    ),
-    "percent",
-)
-
-current_gm_percent = format_metric_value(
-    percent_of_sales(
-        current_week["gm_labor"],
-        current_week["net_sales"],
-    ),
-    "percent",
-)
-
-current_dm_percent = format_metric_value(
-    percent_of_sales(
-        current_week["dm_labor"],
-        current_week["net_sales"],
-    ),
-    "percent",
-)
-
-st.caption(
-    escape_dollar_signs(
-        f"Previous week was {previous_label}. Target is "
-        f"{target_labor_percent:.1f}% "
-        f"({hourly_target_percent:.1f}% hourly + "
-        f"{gm_target_percent:.1f}% GM + "
-        f"{dm_target_percent:.1f}% DM). Hourly pay was "
-        f"{hourly_label} ({current_hourly_percent} of net "
-        f"sales), GM salary was {gm_label} "
-        f"({current_gm_percent}), and DM salary was "
-        f"{dm_label} ({current_dm_percent})."
     )
-)
-
-if previous_week is None:
-    st.info(
-        "Only one week of labor history is available, so "
-        "there is nothing to compare against yet."
+    hourly_label = format_whole_dollars(
+        summary_current["hourly_labor"]
+    )
+    gm_label = format_whole_dollars(summary_current["gm_labor"])
+    dm_label = format_whole_dollars(summary_current["dm_labor"])
+    current_hourly_percent = format_metric_value(
+        percent_of_sales(
+            summary_current["hourly_labor"],
+            summary_current["net_sales"],
+        ),
+        "percent",
+    )
+    current_gm_percent = format_metric_value(
+        percent_of_sales(
+            summary_current["gm_labor"],
+            summary_current["net_sales"],
+        ),
+        "percent",
+    )
+    current_dm_percent = format_metric_value(
+        percent_of_sales(
+            summary_current["dm_labor"],
+            summary_current["net_sales"],
+        ),
+        "percent",
     )
 
-if latest_week_is_partial:
-    days_in_current_week = int(current_week["days_counted"])
+    st.caption(
+        escape_dollar_signs(
+            f"Previous period was {previous_label}. Target is "
+            f"{target_labor_percent:.1f}% "
+            f"({hourly_target_percent:.1f}% hourly + "
+            f"{gm_target_percent:.1f}% GM + "
+            f"{dm_target_percent:.1f}% DM). Hourly pay was "
+            f"{hourly_label} ({current_hourly_percent} of net "
+            f"sales), GM salary was {gm_label} "
+            f"({current_gm_percent}), and DM salary was "
+            f"{dm_label} ({current_dm_percent})."
+        )
+    )
 
-    if week_to_date_applied:
+    if int(summary_current["days_counted"]) == 0:
+        st.info(
+            f"No labor falls in {summary_current['period_range']}."
+        )
+    elif not bool(summary_current["is_complete"]):
         st.caption(
-            f"The week of {current_week_label} has "
-            f"{days_in_current_week} day(s) of labor data. "
-            "Every week below is trimmed to the same days "
-            "for a like-for-like comparison."
-        )
-    else:
-        st.caption(
-            f"The week of {current_week_label} has only "
-            f"{days_in_current_week} day(s) of labor data "
-            "and is compared against full prior weeks."
+            f"The period ending "
+            f"{summary_current['period_end']:%b %d, %Y} has "
+            f"{int(summary_current['days_counted'])} of "
+            f"{period_days} day(s) of data, so its total is short."
         )
 
-# Trimming can empty a prior week completely when its labor
-# records land on different weekdays than the current week.
-if (
-    week_to_date_applied
-    and previous_week is not None
-    and int(previous_week["days_counted"]) == 0
-    and (
-        labor_df["week_start"] == previous_week["week_start"]
-    ).any()
-):
-    st.info(
-        "The previous week has labor records, but none on "
-        "the same weekdays as the current week, so the "
-        "week-to-date comparison is empty. Turn off "
-        "\"Compare week to date\" to compare whole weeks."
-    )
+    if (
+        summary_previous is None
+        or int(summary_previous["days_counted"]) == 0
+    ):
+        st.info(
+            "The previous period has no labor, so there is "
+            "nothing to compare against yet."
+        )
 
 
 # ---------------------------------------------------------
@@ -1553,6 +1593,45 @@ visible_week_starts = set(visible_weeks_df["week_start"])
 visible_daily_df = labor_df[
     labor_df["week_start"].isin(visible_week_starts)
 ].copy()
+
+current_week_label = (
+    f"{current_week['week_start']:%b %d}–"
+    f"{current_week['week_start'] + timedelta(days=6):%b %d, %Y}"
+)
+
+if latest_week_is_partial:
+    days_in_current_week = int(current_week["days_counted"])
+
+    if week_to_date_applied:
+        st.caption(
+            f"The week of {current_week_label} has "
+            f"{days_in_current_week} day(s) of labor data. "
+            "The role, overtime, and table sections trim "
+            "every week to the same days."
+        )
+    else:
+        st.caption(
+            f"The week of {current_week_label} has only "
+            f"{days_in_current_week} day(s) of labor data "
+            "and is compared against full prior weeks."
+        )
+
+# Trimming can empty a prior week completely when its labor
+# records land on different weekdays than the current week.
+if (
+    week_to_date_applied
+    and previous_week is not None
+    and int(previous_week["days_counted"]) == 0
+    and (
+        labor_df["week_start"] == previous_week["week_start"]
+    ).any()
+):
+    st.info(
+        "The previous week has labor records, but none on "
+        "the same weekdays as the current week, so the "
+        "week-to-date comparison is empty. Turn off "
+        "\"Compare week to date\" to compare whole weeks."
+    )
 
 
 # ---------------------------------------------------------

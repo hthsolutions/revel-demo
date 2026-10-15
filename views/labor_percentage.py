@@ -1100,7 +1100,7 @@ net_sales_peak = visible_weeks_df["net_sales"].max()
 if pd.isna(net_sales_peak) or net_sales_peak <= 0:
     net_sales_axis_max = 1.0
 else:
-    net_sales_axis_max = float(net_sales_peak) * 1.08
+    net_sales_axis_max = float(net_sales_peak) * 2
 
 net_sales_scale = alt.Scale(domain=[0, net_sales_axis_max])
 
@@ -1202,7 +1202,7 @@ st.caption(
     "largest segment at the bottom. The line is total labor "
     "as a percent of net sales, and the dashed line is the "
     "total labor target. The outer right axis, in teal, is "
-    "net sales."
+    "net sales, and its top is twice the highest week shown."
 )
 
 

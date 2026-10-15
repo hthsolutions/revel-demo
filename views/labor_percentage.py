@@ -92,6 +92,49 @@ def stack_labor_types(
     return long_df
 
 
+def rank_stack(
+    frame: pd.DataFrame,
+    category_column: str,
+    value_column: str,
+) -> tuple[pd.DataFrame, list]:
+    """Largest category at the bottom, then smaller ones above."""
+
+    ranked = frame.copy()
+
+    if ranked.empty:
+        ranked["stack_rank"] = pd.Series(dtype="int64")
+        return ranked, []
+
+    totals = (
+        ranked.groupby(category_column, dropna=False)[value_column]
+        .sum()
+        .reset_index()
+        .sort_values(
+            [value_column, category_column],
+            ascending=[False, True],
+        )
+    )
+    category_order = totals[category_column].tolist()
+    rank_by_category = {
+        category: index
+        for index, category in enumerate(category_order)
+    }
+    ranked["stack_rank"] = ranked[category_column].map(
+        rank_by_category
+    )
+
+    return ranked, category_order
+
+
+def format_whole_dollars(value) -> str:
+    """Currency with no cents."""
+
+    if value is None or pd.isna(value):
+        return "—"
+
+    return f"${value:,.0f}"
+
+
 def melt_labor_rates(
     frame: pd.DataFrame,
     id_columns: list[str],
@@ -767,10 +810,7 @@ summary_columns[0].metric(
 
 summary_columns[1].metric(
     "Total Labor",
-    format_metric_value(
-        current_week["total_labor"],
-        "currency",
-    ),
+    format_whole_dollars(current_week["total_labor"]),
     delta=(
         f"{percent_change(current_week['total_labor'], previous_week['total_labor']):+.2f}%"
         if previous_week is not None
@@ -787,10 +827,7 @@ summary_columns[1].metric(
 
 summary_columns[2].metric(
     "Net Sales",
-    format_metric_value(
-        current_week["net_sales"],
-        "currency",
-    ),
+    format_whole_dollars(current_week["net_sales"]),
     delta=(
         f"{percent_change(current_week['net_sales'], previous_week['net_sales']):+.2f}%"
         if previous_week is not None
@@ -806,10 +843,7 @@ summary_columns[2].metric(
 
 summary_columns[3].metric(
     "SpLH",
-    format_metric_value(
-        current_week["sales_per_labor_hour"],
-        "currency",
-    ),
+    format_whole_dollars(current_week["sales_per_labor_hour"]),
     delta=(
         f"{percent_change(current_week['sales_per_labor_hour'], previous_week['sales_per_labor_hour']):+.2f}%"
         if previous_week is not None
@@ -832,20 +866,13 @@ previous_label = format_metric_value(
     "percent",
 )
 
-hourly_label = format_metric_value(
-    current_week["hourly_labor"],
-    "currency",
+hourly_label = format_whole_dollars(
+    current_week["hourly_labor"]
 )
 
-gm_label = format_metric_value(
-    current_week["gm_labor"],
-    "currency",
-)
+gm_label = format_whole_dollars(current_week["gm_labor"])
 
-dm_label = format_metric_value(
-    current_week["dm_labor"],
-    "currency",
-)
+dm_label = format_whole_dollars(current_week["dm_labor"])
 
 current_hourly_percent = format_metric_value(
     percent_of_sales(
@@ -1002,17 +1029,17 @@ labor_dollar_bars = (
             alt.Tooltip(
                 "labor_dollars:Q",
                 title="Segment",
-                format="$,.2f",
+                format="$,.0f",
             ),
             alt.Tooltip(
                 "total_labor:Q",
                 title="Total Labor",
-                format="$,.2f",
+                format="$,.0f",
             ),
             alt.Tooltip(
                 "net_sales:Q",
                 title="Net Sales",
-                format="$,.2f",
+                format="$,.0f",
             ),
             alt.Tooltip(
                 "days_counted:Q",
@@ -1126,7 +1153,7 @@ net_sales_line = (
             alt.Tooltip(
                 "net_sales:Q",
                 title="Net Sales",
-                format="$,.2f",
+                format="$,.0f",
             ),
         ],
     )
@@ -1215,15 +1242,19 @@ daily_axis = alt.X(
     ),
 )
 
-daily_stacked_df = stack_labor_types(
-    visible_daily_df,
-    [
-        "business_date",
-        "net_sales",
-        "total_labor",
-        "labor_percent",
-    ],
-    bar_type_labels,
+daily_stacked_df, daily_type_order = rank_stack(
+    stack_labor_types(
+        visible_daily_df,
+        [
+            "business_date",
+            "net_sales",
+            "total_labor",
+            "labor_percent",
+        ],
+        bar_type_labels,
+    ),
+    "labor_type",
+    "labor_dollars",
 )
 
 daily_labor_bars = (
@@ -1237,11 +1268,12 @@ daily_labor_bars = (
             stack="zero",
             axis=alt.Axis(format="$,.0f"),
         ),
+        order=alt.Order("stack_rank:Q", sort="ascending"),
         color=alt.Color(
             "labor_type:N",
             title="Labor Type",
-            scale=bar_color_scale,
-            sort=list(bar_type_labels.values()),
+            scale=color_scale(daily_type_order),
+            sort=daily_type_order,
         ),
         tooltip=[
             alt.Tooltip(
@@ -1253,17 +1285,17 @@ daily_labor_bars = (
             alt.Tooltip(
                 "labor_dollars:Q",
                 title="Segment",
-                format="$,.2f",
+                format="$,.0f",
             ),
             alt.Tooltip(
                 "net_sales:Q",
                 title="Net Sales",
-                format="$,.2f",
+                format="$,.0f",
             ),
             alt.Tooltip(
                 "total_labor:Q",
                 title="Total Labor",
-                format="$,.2f",
+                format="$,.0f",
             ),
             alt.Tooltip(
                 "labor_percent:Q",
@@ -1277,14 +1309,16 @@ daily_labor_bars = (
 daily_rates_df = melt_labor_rates(
     visible_daily_df,
     ["business_date"],
-    rate_series,
+    {"labor_percent": "Total"},
 )
 
 daily_percent_min, daily_percent_max = percent_axis_limits(
     visible_daily_df,
-    list(rate_series.keys()),
-    target_values,
+    ["labor_percent"],
+    [float(target_labor_percent)],
 )
+
+total_rate_scale = color_scale(["Total"])
 
 daily_percent_scale = alt.Scale(
     domain=[daily_percent_min, daily_percent_max],
@@ -1312,8 +1346,8 @@ daily_rate_lines = (
         color=alt.Color(
             "rate_series:N",
             title="Labor %",
-            scale=rate_color_scale,
-            sort=rate_order,
+            scale=total_rate_scale,
+            legend=None,
         ),
         tooltip=[
             alt.Tooltip(
@@ -1334,8 +1368,12 @@ daily_rate_lines = (
     )
 )
 
+daily_target_df = target_df.loc[
+    target_df["rate_series"] == "Total"
+]
+
 daily_target_rules = (
-    alt.Chart(target_df)
+    alt.Chart(daily_target_df)
     .mark_rule(
         strokeWidth=2,
         strokeDash=[8, 5],
@@ -1348,7 +1386,7 @@ daily_target_rules = (
         ),
         color=alt.Color(
             "rate_series:N",
-            scale=rate_color_scale,
+            scale=total_rate_scale,
             legend=None,
         ),
         tooltip=[
@@ -1381,12 +1419,12 @@ daily_chart = (
 st.altair_chart(daily_chart, use_container_width=True)
 
 st.caption(
-    "Bars show each day's hourly, GM, and DM labor dollars. "
-    "Lines are hourly, GM, DM, and total labor as a percent "
-    "of net sales, and each dashed line is that series' "
-    "target. Low-volume days carry the same fixed salary "
-    "as busy days, so the labor rate usually spikes on the "
-    "slowest days."
+    "Bars show each day's hourly, GM, and DM labor dollars, "
+    "with the largest segment at the bottom. The line is "
+    "total labor as a percent of net sales, and the dashed "
+    "line is the total labor target. Low-volume days carry "
+    "the same fixed salary as busy days, so the labor rate "
+    "usually spikes on the slowest days."
 )
 
 
@@ -1418,6 +1456,27 @@ if not shift_df.empty:
     ]
 
     if not hourly_roles_df.empty:
+        # GM and DM are paid from the salary feed. Shift
+        # rows for those roles are zero-dollar duplicates.
+        salaried_roles = salaried_role_keys(salary_df)
+        shift_role_key = (
+            hourly_roles_df["role"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+        hourly_roles_df = hourly_roles_df.loc[
+            ~shift_role_key.isin(salaried_roles)
+        ].copy()
+
+    if not hourly_roles_df.empty:
+        hourly_roles_df["role"] = (
+            hourly_roles_df["role"]
+            .fillna("Unassigned")
+            .astype(str)
+            .str.strip()
+        )
         role_frames.append(
             hourly_roles_df
             .groupby(["week_start", "role"], as_index=False)
@@ -1453,7 +1512,7 @@ if not salary_df.empty:
             .agg(labor_dollars=("daily_salary", "sum"))
         )
         salary_roles_df["role"] = (
-            salary_roles_df["role"] + " (salary)"
+            salary_roles_df["role"].astype(str).str.strip()
         )
         role_frames.append(salary_roles_df)
 
@@ -1463,54 +1522,74 @@ if not role_frames:
         "selected weeks."
     )
 else:
-    role_df = pd.concat(role_frames, ignore_index=True)
+    role_df = (
+        pd.concat(role_frames, ignore_index=True)
+        .groupby(["week_start", "role"], as_index=False)
+        .agg(labor_dollars=("labor_dollars", "sum"))
+    )
+    role_df = role_df[role_df["labor_dollars"] > 0].copy()
 
-    role_df["week_label"] = role_df[
-        "week_start"
-    ].dt.strftime("%b %d")
+    if role_df.empty:
+        st.info(
+            "No role-level labor records fall inside the "
+            "selected weeks."
+        )
+    else:
+        role_df["week_label"] = role_df[
+            "week_start"
+        ].dt.strftime("%b %d")
+        role_df, role_order = rank_stack(
+            role_df,
+            "role",
+            "labor_dollars",
+        )
 
-    role_chart = (
-        alt.Chart(role_df)
-        .mark_bar()
-        .encode(
-            x=alt.X(
-                "week_label:N",
-                title="Week Starting",
-                sort=week_label_order,
-            ),
-            y=alt.Y(
-                "labor_dollars:Q",
-                title="Labor Dollars",
-                axis=alt.Axis(format="$,.0f"),
-            ),
-            color=alt.Color(
-                "role:N",
-                title="Role",
-                scale=alt.Scale(scheme="tableau10"),
-            ),
-            tooltip=[
-                alt.Tooltip(
+        role_chart = (
+            alt.Chart(role_df)
+            .mark_bar()
+            .encode(
+                x=alt.X(
                     "week_label:N",
                     title="Week Starting",
+                    sort=week_label_order,
                 ),
-                alt.Tooltip("role:N", title="Role"),
-                alt.Tooltip(
+                y=alt.Y(
                     "labor_dollars:Q",
                     title="Labor Dollars",
-                    format="$,.2f",
+                    stack="zero",
+                    axis=alt.Axis(format="$,.0f"),
                 ),
-            ],
+                order=alt.Order("stack_rank:Q", sort="ascending"),
+                color=alt.Color(
+                    "role:N",
+                    title="Role",
+                    scale=alt.Scale(scheme="tableau10"),
+                    sort=role_order,
+                ),
+                tooltip=[
+                    alt.Tooltip(
+                        "week_label:N",
+                        title="Week Starting",
+                    ),
+                    alt.Tooltip("role:N", title="Role"),
+                    alt.Tooltip(
+                        "labor_dollars:Q",
+                        title="Labor Dollars",
+                        format="$,.0f",
+                    ),
+                ],
+            )
+            .properties(height=400)
         )
-        .properties(height=400)
-    )
 
-    st.altair_chart(role_chart, use_container_width=True)
+        st.altair_chart(role_chart, use_container_width=True)
 
-    st.caption(
-        "Role totals cover every day with a labor record, "
-        "including days the sales feed has not reported, so "
-        "they can exceed the weekly totals above."
-    )
+        st.caption(
+            "Role totals cover every day with a labor record, "
+            "including days the sales feed has not reported, so "
+            "they can exceed the weekly totals above. The "
+            "largest role sits at the bottom of each bar."
+        )
 
 
 # ---------------------------------------------------------
@@ -1651,7 +1730,7 @@ if not ot_role_df.empty:
                 alt.Tooltip(
                     "ot_labor:Q",
                     title="OT Labor $",
-                    format="$,.2f",
+                    format="$,.0f",
                 ),
             ],
         )
@@ -1747,12 +1826,12 @@ ot_percent_line = (
             alt.Tooltip(
                 "ot_labor:Q",
                 title="OT Labor $",
-                format="$,.2f",
+                format="$,.0f",
             ),
             alt.Tooltip(
                 "total_labor:Q",
                 title="Total Labor $",
-                format="$,.2f",
+                format="$,.0f",
             ),
         ],
     )
@@ -1822,23 +1901,23 @@ with st.expander("View weekly labor breakdown"):
             ),
             "net_sales": st.column_config.NumberColumn(
                 "Net Sales",
-                format="$%.2f",
+                format="$%.0f",
             ),
             "hourly_labor": st.column_config.NumberColumn(
                 "Hourly",
-                format="$%.2f",
+                format="$%.0f",
             ),
             "gm_labor": st.column_config.NumberColumn(
                 "GM",
-                format="$%.2f",
+                format="$%.0f",
             ),
             "dm_labor": st.column_config.NumberColumn(
                 "DM",
-                format="$%.2f",
+                format="$%.0f",
             ),
             "total_labor": st.column_config.NumberColumn(
                 "Total Labor",
-                format="$%.2f",
+                format="$%.0f",
             ),
             "labor_percent": st.column_config.NumberColumn(
                 "Labor %",
@@ -1863,7 +1942,7 @@ with st.expander("View weekly labor breakdown"):
             "sales_per_labor_hour": (
                 st.column_config.NumberColumn(
                     "Sales / Hour",
-                    format="$%.2f",
+                    format="$%.0f",
                 )
             ),
         },
@@ -1907,23 +1986,23 @@ with st.expander("View daily labor records"):
             "location": "Location",
             "net_sales": st.column_config.NumberColumn(
                 "Net Sales",
-                format="$%.2f",
+                format="$%.0f",
             ),
             "hourly_labor": st.column_config.NumberColumn(
                 "Hourly",
-                format="$%.2f",
+                format="$%.0f",
             ),
             "gm_labor": st.column_config.NumberColumn(
                 "GM",
-                format="$%.2f",
+                format="$%.0f",
             ),
             "dm_labor": st.column_config.NumberColumn(
                 "DM",
-                format="$%.2f",
+                format="$%.0f",
             ),
             "total_labor": st.column_config.NumberColumn(
                 "Total Labor",
-                format="$%.2f",
+                format="$%.0f",
             ),
             "labor_percent": st.column_config.NumberColumn(
                 "Labor %",
@@ -1940,7 +2019,7 @@ with st.expander("View daily labor records"):
             "sales_per_labor_hour": (
                 st.column_config.NumberColumn(
                     "Sales / Hour",
-                    format="$%.2f",
+                    format="$%.0f",
                 )
             ),
             "employee_count": st.column_config.NumberColumn(

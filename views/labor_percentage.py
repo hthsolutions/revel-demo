@@ -19,6 +19,45 @@ from revel_data import (
 )
 
 
+# Fixed-length buckets counted backward from the date the
+# user picks. A month is 30 days so every month is the
+# same length, matching Sales Growth.
+INTERVALS = {
+    "Daily": {
+        "days": 1,
+        "max_duration": 60,
+        "default_duration": 30,
+        "unit": "days",
+        "x_title": "Business date",
+        "duration_label": "Duration (days)",
+    },
+    "Weekly": {
+        "days": 7,
+        "max_duration": 52,
+        "default_duration": 8,
+        "unit": "weeks",
+        "x_title": "Week",
+        "duration_label": "Duration (weeks)",
+    },
+    "Monthly": {
+        "days": 30,
+        "max_duration": 12,
+        "default_duration": 6,
+        "unit": "months",
+        "x_title": "30-day period",
+        "duration_label": "Duration (months)",
+    },
+}
+
+PERIOD_SUM_COLUMNS = [
+    "net_sales",
+    "hourly_labor",
+    "gm_labor",
+    "dm_labor",
+    "other_salary_labor",
+    "total_labor",
+]
+
 # Columns summed when rolling daily labor up to a week.
 WEEKLY_SUM_COLUMNS = [
     "net_sales",
@@ -207,6 +246,177 @@ def safe_ratio(
     return numerator.astype(float) / denominator.astype(
         float
     ).replace(0.0, NOT_AVAILABLE)
+
+
+def format_period_label(
+    start,
+    end,
+    period_days: int,
+    include_year: bool,
+) -> str:
+    """Short axis label for one bucket."""
+
+    start = pd.Timestamp(start)
+    end = pd.Timestamp(end)
+
+    if period_days == 1:
+        if include_year:
+            return f"{end:%m/%d/%y}"
+        return f"{end:%m/%d}"
+
+    if include_year:
+        return f"{start:%m/%d/%y}–{end:%m/%d/%y}"
+
+    return f"{start:%m/%d}–{end:%m/%d}"
+
+
+def format_period_range(start, end, period_days: int) -> str:
+    """Full date range shown in tooltips."""
+
+    start = pd.Timestamp(start)
+    end = pd.Timestamp(end)
+
+    if period_days == 1:
+        return f"{end:%b %d, %Y}"
+
+    return f"{start:%b %d, %Y} – {end:%b %d, %Y}"
+
+
+def build_labor_period_frame(
+    frame: pd.DataFrame,
+    date_end,
+    period_days: int,
+    duration: int,
+) -> pd.DataFrame:
+    """Bucket daily labor into equal periods ending on date_end.
+
+    A period with no reported days stays blank instead of
+    becoming zero.
+    """
+
+    date_end = pd.Timestamp(date_end).normalize()
+    period_days = int(period_days)
+    duration = int(duration)
+
+    working = frame.copy()
+    working["business_date"] = pd.to_datetime(
+        working["business_date"]
+    ).dt.normalize()
+
+    history_start = date_end - pd.Timedelta(
+        days=period_days * duration - 1
+    )
+
+    calendar_rows = []
+
+    for period_index in range(duration):
+        period_end = date_end - pd.Timedelta(
+            days=period_days * period_index
+        )
+        period_start = period_end - pd.Timedelta(
+            days=period_days - 1
+        )
+        calendar_rows.append(
+            {
+                "period_index": period_index,
+                "period_start": period_start,
+                "period_end": period_end,
+            }
+        )
+
+    calendar = pd.DataFrame(calendar_rows)
+
+    scoped = working.loc[
+        working["business_date"].between(
+            history_start,
+            date_end,
+            inclusive="both",
+        )
+    ].copy()
+
+    if not scoped.empty:
+        scoped["period_index"] = (
+            (date_end - scoped["business_date"]).dt.days
+            // period_days
+        ).astype(int)
+        scoped = scoped[
+            scoped["period_index"].between(0, duration - 1)
+        ]
+
+    if scoped.empty:
+        grouped = pd.DataFrame(
+            {"period_index": pd.Series(dtype="int64")}
+        )
+    else:
+        grouped = (
+            scoped
+            .groupby("period_index", as_index=False)
+            .agg(
+                **{
+                    column_name: (column_name, "sum")
+                    for column_name in PERIOD_SUM_COLUMNS
+                },
+                days_counted=("business_date", "nunique"),
+            )
+        )
+
+    calendar = calendar.merge(
+        grouped,
+        on="period_index",
+        how="left",
+    )
+
+    for column_name in PERIOD_SUM_COLUMNS:
+        if column_name not in calendar.columns:
+            calendar[column_name] = NOT_AVAILABLE
+
+    if "days_counted" not in calendar.columns:
+        calendar["days_counted"] = 0
+
+    calendar["days_counted"] = (
+        calendar["days_counted"].fillna(0).astype(int)
+    )
+
+    missing_period = calendar["days_counted"].eq(0)
+    calendar.loc[missing_period, PERIOD_SUM_COLUMNS] = (
+        NOT_AVAILABLE
+    )
+
+    calendar["is_complete"] = (
+        calendar["days_counted"] >= period_days
+    )
+    calendar["labor_percent"] = (
+        safe_ratio(
+            calendar["total_labor"],
+            calendar["net_sales"],
+        )
+        * 100
+    )
+
+    include_year = (
+        calendar["period_start"].min().year
+        != calendar["period_end"].max().year
+    )
+    calendar["period_label"] = [
+        format_period_label(start, end, period_days, include_year)
+        for start, end in zip(
+            calendar["period_start"],
+            calendar["period_end"],
+        )
+    ]
+    calendar["period_range"] = [
+        format_period_range(start, end, period_days)
+        for start, end in zip(
+            calendar["period_start"],
+            calendar["period_end"],
+        )
+    ]
+
+    return (
+        calendar
+        .sort_values("period_end")
+        .reset_index(drop=True)
+    )
 
 
 st.title("Labor % of Net Sales")
@@ -430,6 +640,93 @@ selected_location = st.sidebar.selectbox(
     options=["All Locations", *available_locations],
 )
 
+if selected_location != "All Locations":
+    labor_df = labor_df[
+        labor_df["location"] == selected_location
+    ].copy()
+    location_sales_df = daily_sales_df[
+        daily_sales_df["location"] == selected_location
+    ].copy()
+else:
+    labor_df = labor_df.copy()
+    location_sales_df = daily_sales_df.copy()
+
+if labor_df.empty:
+    st.warning(
+        "No days have both sales and labor records for the "
+        "selected location. The sales table covers "
+        f"{len(location_sales_df):,} day(s), but none of "
+        "them line up with a shift record."
+    )
+    st.stop()
+
+selected_interval = st.sidebar.selectbox(
+    "Interval",
+    options=list(INTERVALS),
+    index=list(INTERVALS).index("Weekly"),
+    help=(
+        "Periods are counted backward from Date end. "
+        "A week is 7 days and a month is 30 days. "
+        "This sets the Labor Dollars and Labor Rate chart."
+    ),
+)
+
+interval = INTERVALS[selected_interval]
+period_days = interval["days"]
+
+min_date = labor_df["business_date"].min().date()
+max_date = labor_df["business_date"].max().date()
+date_key = "labor_rate_date_end"
+
+if date_key not in st.session_state:
+    st.session_state[date_key] = max_date
+else:
+    chosen_date = st.session_state[date_key]
+    if chosen_date < min_date or chosen_date > max_date:
+        st.session_state[date_key] = min(
+            max(chosen_date, min_date),
+            max_date,
+        )
+
+date_end = st.sidebar.date_input(
+    "Date end",
+    min_value=min_date,
+    max_value=max_date,
+    key=date_key,
+    help="Last business date included in the labor rate chart.",
+)
+
+duration = st.sidebar.number_input(
+    interval["duration_label"],
+    min_value=1,
+    max_value=interval["max_duration"],
+    value=interval["default_duration"],
+    step=1,
+    key=f"labor_rate_duration_{selected_interval}",
+    help=(
+        f"How many {interval['unit']} to include, ending "
+        f"on Date end. "
+        + (
+            "Each month is 30 days. "
+            if period_days == 30
+            else ""
+        )
+        + f"Maximum is {interval['max_duration']}."
+    ),
+)
+duration = int(duration)
+
+if period_days == 1:
+    st.sidebar.caption("Each bar is one business day.")
+elif period_days == 7:
+    st.sidebar.caption(
+        "Each bar is 7 days, ending on Date end."
+    )
+else:
+    st.sidebar.caption(
+        "Each bar is 30 days, ending on Date end."
+    )
+
 selected_week_start_name = st.sidebar.selectbox(
     "Week starts on",
     options=list(WEEK_START_OPTIONS.keys()),
@@ -494,26 +791,6 @@ st.sidebar.metric(
     f"{target_labor_percent:.1f}%",
     help="Hourly labor % plus GM labor % plus DM labor %.",
 )
-
-if selected_location != "All Locations":
-    labor_df = labor_df[
-        labor_df["location"] == selected_location
-    ].copy()
-    location_sales_df = daily_sales_df[
-        daily_sales_df["location"] == selected_location
-    ].copy()
-else:
-    labor_df = labor_df.copy()
-    location_sales_df = daily_sales_df.copy()
-
-if labor_df.empty:
-    st.warning(
-        "No days have both sales and labor records for the "
-        "selected location. The sales table covers "
-        f"{len(location_sales_df):,} day(s), but none of "
-        "them line up with a shift record."
-    )
-    st.stop()
 
 
 # ---------------------------------------------------------
@@ -935,494 +1212,347 @@ if (
 
 
 # ---------------------------------------------------------
-# Weekly labor dollars and labor rate
+# Labor dollars and labor rate
 # ---------------------------------------------------------
 
-st.subheader("Weekly Labor Dollars and Labor Rate")
+st.subheader("Labor Dollars and Labor Rate")
 
-weekly_labor_max = float(
-    visible_weeks_df["total_labor"].max()
-)
-
-if pd.isna(weekly_labor_max) or weekly_labor_max <= 0:
-    labor_axis_max = 1.0
+if date_end is None:
+    st.warning("Pick a date end.")
+    rate_df = pd.DataFrame()
 else:
-    labor_axis_max = weekly_labor_max * 1.05
+    rate_df = build_labor_period_frame(
+        labor_df,
+        date_end,
+        period_days,
+        duration,
+    )
 
-percent_axis_min, percent_axis_max = percent_axis_limits(
-    visible_weeks_df,
-    ["labor_percent"],
-    [float(target_labor_percent)],
+if date_end is not None and not rate_df.empty:
+    window_start = pd.Timestamp(rate_df["period_start"].min())
+    window_end = pd.Timestamp(date_end)
+
+    if window_start.normalize() == window_end.normalize():
+        window_text = f"{window_end:%b %d, %Y}"
+    else:
+        window_text = (
+            f"{window_start:%b %d, %Y} – {window_end:%b %d, %Y}"
+        )
+
+    st.caption(
+        f"{window_text} · {duration} {interval['unit']} · "
+        f"{selected_location}"
+    )
+
+    location_max = pd.Timestamp(
+        labor_df["business_date"].max()
+    )
+
+    if pd.Timestamp(date_end) > location_max:
+        st.caption(
+            f"The latest labor date for {selected_location} is "
+            f"{location_max:%b %d, %Y}."
+        )
+
+rate_has_values = (
+    date_end is not None
+    and not rate_df.empty
+    and (
+        rate_df["net_sales"].notna().any()
+        or rate_df["total_labor"].notna().any()
+    )
 )
 
-target_df = pd.DataFrame(
-    {
-        "rate_series": ["Total"],
-        "target": [float(target_labor_percent)],
-    }
-)
+if not rate_has_values:
+    if date_end is not None:
+        st.info(
+            "No labor falls in the selected date range."
+        )
+else:
+    period_label_order = rate_df["period_label"].tolist()
+    label_angle = -40 if duration > 6 else 0
+    period_axis = alt.X(
+        "period_label:N",
+        title=interval["x_title"],
+        sort=period_label_order,
+        axis=alt.Axis(
+            labelAngle=label_angle,
+            labelOverlap="greedy",
+        ),
+    )
 
-weekly_stacked_df, weekly_type_order = rank_stack(
-    stack_labor_types(
-        visible_weeks_df,
-        [
-            "week_label",
-            "is_complete_week",
-            "total_labor",
-            "net_sales",
-            "days_counted",
-        ],
-        bar_type_labels,
-    ),
-    "labor_type",
-    "labor_dollars",
-)
+    weekly_labor_max = float(
+        rate_df["total_labor"].max()
+    )
 
-labor_dollar_bars = (
-    alt.Chart(weekly_stacked_df)
-    .mark_bar()
-    .encode(
-        x=alt.X(
-            "week_label:N",
-            title="Week Starting",
-            sort=week_label_order,
+    if pd.isna(weekly_labor_max) or weekly_labor_max <= 0:
+        labor_axis_max = 1.0
+    else:
+        labor_axis_max = weekly_labor_max * 1.05
+
+    percent_axis_min, percent_axis_max = percent_axis_limits(
+        rate_df,
+        ["labor_percent"],
+        [float(target_labor_percent)],
+    )
+
+    target_df = pd.DataFrame(
+        {
+            "rate_series": ["Total"],
+            "target": [float(target_labor_percent)],
+        }
+    )
+
+    weekly_stacked_df, weekly_type_order = rank_stack(
+        stack_labor_types(
+            rate_df,
+            [
+                "period_label",
+                "period_range",
+                "is_complete",
+                "total_labor",
+                "net_sales",
+                "days_counted",
+            ],
+            bar_type_labels,
         ),
-        y=alt.Y(
-            "labor_dollars:Q",
-            title="Total Labor",
-            stack="zero",
-            axis=alt.Axis(format="$,.0f"),
-            scale=alt.Scale(domain=[0, labor_axis_max]),
-        ),
-        order=alt.Order("stack_rank:Q", sort="ascending"),
-        color=alt.Color(
-            "labor_type:N",
-            title="Labor Type",
-            scale=color_scale(weekly_type_order),
-            sort=weekly_type_order,
-        ),
-        opacity=alt.condition(
-            alt.datum.is_complete_week,
-            alt.value(0.85),
-            alt.value(0.4),
-        ),
-        tooltip=[
-            alt.Tooltip(
-                "week_label:N",
-                title="Week Starting",
-            ),
-            alt.Tooltip("labor_type:N", title="Labor Type"),
-            alt.Tooltip(
+        "labor_type",
+        "labor_dollars",
+    )
+
+    labor_dollar_bars = (
+        alt.Chart(weekly_stacked_df)
+        .mark_bar()
+        .encode(
+            x=period_axis,
+            y=alt.Y(
                 "labor_dollars:Q",
-                title="Segment",
-                format="$,.0f",
-            ),
-            alt.Tooltip(
-                "total_labor:Q",
                 title="Total Labor",
-                format="$,.0f",
+                stack="zero",
+                axis=alt.Axis(format="$,.0f"),
+                scale=alt.Scale(domain=[0, labor_axis_max]),
             ),
-            alt.Tooltip(
-                "net_sales:Q",
-                title="Net Sales",
-                format="$,.0f",
+            order=alt.Order("stack_rank:Q", sort="ascending"),
+            color=alt.Color(
+                "labor_type:N",
+                title="Labor Type",
+                scale=color_scale(weekly_type_order),
+                sort=weekly_type_order,
             ),
-            alt.Tooltip(
-                "days_counted:Q",
-                title="Days Counted",
-                format=".0f",
+            opacity=alt.condition(
+                alt.datum.is_complete,
+                alt.value(0.85),
+                alt.value(0.4),
             ),
-        ],
+            tooltip=[
+                alt.Tooltip(
+                    "period_range:N",
+                    title="Period",
+                ),
+                alt.Tooltip("labor_type:N", title="Labor Type"),
+                alt.Tooltip(
+                    "labor_dollars:Q",
+                    title="Segment",
+                    format="$,.0f",
+                ),
+                alt.Tooltip(
+                    "total_labor:Q",
+                    title="Total Labor",
+                    format="$,.0f",
+                ),
+                alt.Tooltip(
+                    "net_sales:Q",
+                    title="Net Sales",
+                    format="$,.0f",
+                ),
+                alt.Tooltip(
+                    "days_counted:Q",
+                    title="Days Counted",
+                    format=".0f",
+                ),
+            ],
+        )
     )
-)
 
-weekly_rates_df = melt_labor_rates(
-    visible_weeks_df,
-    ["week_label"],
-    {"labor_percent": "Total"},
-)
-
-total_rate_scale = color_scale(["Total"])
-
-percent_scale = alt.Scale(
-    domain=[percent_axis_min, percent_axis_max],
-    zero=False,
-)
-
-labor_rate_lines = (
-    alt.Chart(weekly_rates_df)
-    .mark_line(
-        strokeWidth=2.5,
-        point=alt.OverlayMarkDef(size=55),
+    weekly_rates_df = melt_labor_rates(
+        rate_df,
+        ["period_label", "period_range"],
+        {"labor_percent": "Total"},
     )
-    .encode(
-        x=alt.X(
-            "week_label:N",
-            title="Week Starting",
-            sort=week_label_order,
-        ),
-        y=alt.Y(
-            "rate_percent:Q",
-            title="Labor % of Net Sales",
-            axis=alt.Axis(
-                orient="right",
-                format=".1f",
-                labelExpr="datum.value + '%'",
-            ),
-            scale=percent_scale,
-        ),
-        color=alt.Color(
-            "rate_series:N",
-            title="Labor %",
-            scale=total_rate_scale,
-            legend=None,
-        ),
-        tooltip=[
-            alt.Tooltip(
-                "week_label:N",
-                title="Week Starting",
-            ),
-            alt.Tooltip(
-                "rate_series:N",
-                title="Rate",
-            ),
-            alt.Tooltip(
+
+    total_rate_scale = color_scale(["Total"])
+
+    percent_scale = alt.Scale(
+        domain=[percent_axis_min, percent_axis_max],
+        zero=False,
+    )
+
+    labor_rate_lines = (
+        alt.Chart(weekly_rates_df)
+        .mark_line(
+            strokeWidth=2.5,
+            point=alt.OverlayMarkDef(size=55),
+        )
+        .encode(
+            x=period_axis,
+            y=alt.Y(
                 "rate_percent:Q",
+                title="Labor % of Net Sales",
+                axis=alt.Axis(
+                    orient="right",
+                    format=".1f",
+                    labelExpr="datum.value + '%'",
+                ),
+                scale=percent_scale,
+            ),
+            color=alt.Color(
+                "rate_series:N",
                 title="Labor %",
-                format=".2f",
+                scale=total_rate_scale,
+                legend=None,
             ),
-        ],
+            tooltip=[
+                alt.Tooltip(
+                    "period_range:N",
+                    title="Period",
+                ),
+                alt.Tooltip(
+                    "rate_series:N",
+                    title="Rate",
+                ),
+                alt.Tooltip(
+                    "rate_percent:Q",
+                    title="Labor %",
+                    format=".2f",
+                ),
+            ],
+        )
     )
-)
 
-net_sales_values = visible_weeks_df["net_sales"].dropna()
+    net_sales_values = rate_df["net_sales"].dropna()
 
-if net_sales_values.empty:
-    net_sales_axis_min = 0.0
-    net_sales_axis_max = 1.0
-else:
-    lowest_net_sales = float(net_sales_values.min())
-    highest_net_sales = float(net_sales_values.max())
-    net_sales_axis_min = lowest_net_sales * 0.75
-    net_sales_axis_max = highest_net_sales * 1.25
-    if net_sales_axis_max <= net_sales_axis_min:
-        net_sales_axis_max = net_sales_axis_min + 1.0
+    if net_sales_values.empty:
+        net_sales_axis_min = 0.0
+        net_sales_axis_max = 1.0
+    else:
+        lowest_net_sales = float(net_sales_values.min())
+        highest_net_sales = float(net_sales_values.max())
+        net_sales_axis_min = lowest_net_sales * 0.75
+        net_sales_axis_max = highest_net_sales * 1.25
+        if net_sales_axis_max <= net_sales_axis_min:
+            net_sales_axis_max = net_sales_axis_min + 1.0
 
-net_sales_scale = alt.Scale(
-    domain=[net_sales_axis_min, net_sales_axis_max],
-    zero=False,
-    nice=False,
-)
+    net_sales_scale = alt.Scale(
+        domain=[net_sales_axis_min, net_sales_axis_max],
+        zero=False,
+        nice=False,
+    )
 
-net_sales_line = (
-    alt.Chart(visible_weeks_df)
-    .mark_line(
-        color="#17becf",
-        strokeWidth=2.5,
-        point=alt.OverlayMarkDef(
-            size=55,
+    net_sales_line = (
+        alt.Chart(rate_df)
+        .mark_line(
             color="#17becf",
-        ),
-    )
-    .encode(
-        x=alt.X(
-            "week_label:N",
-            title="Week Starting",
-            sort=week_label_order,
-        ),
-        y=alt.Y(
-            "net_sales:Q",
-            title="Net Sales",
-            axis=alt.Axis(
-                orient="right",
-                offset=90,
-                format="$,.0f",
-                titleColor="#17becf",
-                labelColor="#17becf",
-                grid=False,
+            strokeWidth=2.5,
+            point=alt.OverlayMarkDef(
+                size=55,
+                color="#17becf",
             ),
-            scale=net_sales_scale,
-        ),
-        tooltip=[
-            alt.Tooltip(
-                "week_label:N",
-                title="Week Starting",
-            ),
-            alt.Tooltip(
+        )
+        .encode(
+            x=period_axis,
+            y=alt.Y(
                 "net_sales:Q",
                 title="Net Sales",
-                format="$,.0f",
+                axis=alt.Axis(
+                    orient="right",
+                    offset=90,
+                    format="$,.0f",
+                    titleColor="#17becf",
+                    labelColor="#17becf",
+                    grid=False,
+                ),
+                scale=net_sales_scale,
             ),
-        ],
+            tooltip=[
+                alt.Tooltip(
+                    "period_range:N",
+                    title="Period",
+                ),
+                alt.Tooltip(
+                    "net_sales:Q",
+                    title="Net Sales",
+                    format="$,.0f",
+                ),
+            ],
+        )
     )
-)
 
-target_rules = (
-    alt.Chart(target_df)
-    .mark_rule(
-        strokeWidth=2,
-        strokeDash=[8, 5],
-    )
-    .encode(
-        y=alt.Y(
-            "target:Q",
-            axis=None,
-            scale=percent_scale,
-        ),
-        color=alt.Color(
-            "rate_series:N",
-            scale=total_rate_scale,
-            legend=None,
-        ),
-        tooltip=[
-            alt.Tooltip(
-                "rate_series:N",
-                title="Target",
-            ),
-            alt.Tooltip(
+    target_rules = (
+        alt.Chart(target_df)
+        .mark_rule(
+            strokeWidth=2,
+            strokeDash=[8, 5],
+        )
+        .encode(
+            y=alt.Y(
                 "target:Q",
-                title="Target %",
-                format=".1f",
+                axis=None,
+                scale=percent_scale,
             ),
-        ],
+            color=alt.Color(
+                "rate_series:N",
+                scale=total_rate_scale,
+                legend=None,
+            ),
+            tooltip=[
+                alt.Tooltip(
+                    "rate_series:N",
+                    title="Target",
+                ),
+                alt.Tooltip(
+                    "target:Q",
+                    title="Target %",
+                    format=".1f",
+                ),
+            ],
+        )
     )
-)
 
-weekly_labor_chart = (
-    alt.layer(
-        labor_dollar_bars,
-        net_sales_line,
-        labor_rate_lines,
-        target_rules,
+    weekly_labor_chart = (
+        alt.layer(
+            labor_dollar_bars,
+            net_sales_line,
+            labor_rate_lines,
+            target_rules,
+        )
+        .resolve_scale(
+            y="independent",
+            color="independent",
+        )
+        .properties(height=440)
     )
-    .resolve_scale(
-        y="independent",
-        color="independent",
+
+    st.altair_chart(
+        weekly_labor_chart,
+        use_container_width=True,
     )
-    .properties(height=440)
-)
 
-st.altair_chart(
-    weekly_labor_chart,
-    use_container_width=True,
-)
-
-st.caption(
-    "Bars show hourly, GM, and DM labor dollars, with the "
-    "largest segment at the bottom. The line is total labor "
-    "as a percent of net sales, and the dashed line is the "
-    "total labor target. The outer right axis, in teal, is "
-    "net sales. That axis runs from 75% of the lowest week "
-    "to 125% of the highest week shown."
-)
+    st.caption(
+        "Bars show hourly, GM, and DM labor dollars, with the "
+        "largest segment at the bottom. The line is total labor "
+        "as a percent of net sales, and the dashed line is the "
+        "total labor target. The outer right axis, in teal, is "
+        "net sales. That axis runs from 75% of the lowest period "
+        "to 125% of the highest period shown."
+    )
 
 
-# ---------------------------------------------------------
-# Daily detail across the visible weeks
-# ---------------------------------------------------------
-
-st.subheader("Daily Labor Dollars and Labor Rate")
 
 visible_week_starts = set(visible_weeks_df["week_start"])
 
 visible_daily_df = labor_df[
     labor_df["week_start"].isin(visible_week_starts)
 ].copy()
-
-# Bucketing the date to whole days gives the bars a band to
-# fill and keeps the axis to one label per day.
-daily_axis = alt.X(
-    "yearmonthdate(business_date):O",
-    title="Business Date",
-    axis=alt.Axis(
-        format="%b %d",
-        labelAngle=-45,
-        labelOverlap="greedy",
-    ),
-)
-
-daily_stacked_df, daily_type_order = rank_stack(
-    stack_labor_types(
-        visible_daily_df,
-        [
-            "business_date",
-            "net_sales",
-            "total_labor",
-            "labor_percent",
-        ],
-        bar_type_labels,
-    ),
-    "labor_type",
-    "labor_dollars",
-)
-
-daily_labor_bars = (
-    alt.Chart(daily_stacked_df)
-    .mark_bar(opacity=0.85)
-    .encode(
-        x=daily_axis,
-        y=alt.Y(
-            "labor_dollars:Q",
-            title="Labor Dollars",
-            stack="zero",
-            axis=alt.Axis(format="$,.0f"),
-        ),
-        order=alt.Order("stack_rank:Q", sort="ascending"),
-        color=alt.Color(
-            "labor_type:N",
-            title="Labor Type",
-            scale=color_scale(daily_type_order),
-            sort=daily_type_order,
-        ),
-        tooltip=[
-            alt.Tooltip(
-                "business_date:T",
-                title="Business Date",
-                format="%B %d, %Y",
-            ),
-            alt.Tooltip("labor_type:N", title="Labor Type"),
-            alt.Tooltip(
-                "labor_dollars:Q",
-                title="Segment",
-                format="$,.0f",
-            ),
-            alt.Tooltip(
-                "net_sales:Q",
-                title="Net Sales",
-                format="$,.0f",
-            ),
-            alt.Tooltip(
-                "total_labor:Q",
-                title="Total Labor",
-                format="$,.0f",
-            ),
-            alt.Tooltip(
-                "labor_percent:Q",
-                title="Labor %",
-                format=".2f",
-            ),
-        ],
-    )
-)
-
-daily_rates_df = melt_labor_rates(
-    visible_daily_df,
-    ["business_date"],
-    {"labor_percent": "Total"},
-)
-
-daily_percent_min, daily_percent_max = percent_axis_limits(
-    visible_daily_df,
-    ["labor_percent"],
-    [float(target_labor_percent)],
-)
-
-daily_percent_scale = alt.Scale(
-    domain=[daily_percent_min, daily_percent_max],
-    zero=False,
-)
-
-daily_rate_lines = (
-    alt.Chart(daily_rates_df)
-    .mark_line(
-        strokeWidth=2.5,
-        point=alt.OverlayMarkDef(size=40),
-    )
-    .encode(
-        x=daily_axis,
-        y=alt.Y(
-            "rate_percent:Q",
-            title="Labor % of Net Sales",
-            axis=alt.Axis(
-                orient="right",
-                format=".1f",
-                labelExpr="datum.value + '%'",
-            ),
-            scale=daily_percent_scale,
-        ),
-        color=alt.Color(
-            "rate_series:N",
-            title="Labor %",
-            scale=total_rate_scale,
-            legend=None,
-        ),
-        tooltip=[
-            alt.Tooltip(
-                "business_date:T",
-                title="Business Date",
-                format="%B %d, %Y",
-            ),
-            alt.Tooltip(
-                "rate_series:N",
-                title="Rate",
-            ),
-            alt.Tooltip(
-                "rate_percent:Q",
-                title="Labor %",
-                format=".2f",
-            ),
-        ],
-    )
-)
-
-daily_target_df = target_df.loc[
-    target_df["rate_series"] == "Total"
-]
-
-daily_target_rules = (
-    alt.Chart(daily_target_df)
-    .mark_rule(
-        strokeWidth=2,
-        strokeDash=[8, 5],
-    )
-    .encode(
-        y=alt.Y(
-            "target:Q",
-            axis=None,
-            scale=daily_percent_scale,
-        ),
-        color=alt.Color(
-            "rate_series:N",
-            scale=total_rate_scale,
-            legend=None,
-        ),
-        tooltip=[
-            alt.Tooltip(
-                "rate_series:N",
-                title="Target",
-            ),
-            alt.Tooltip(
-                "target:Q",
-                title="Target %",
-                format=".1f",
-            ),
-        ],
-    )
-)
-
-daily_chart = (
-    alt.layer(
-        daily_labor_bars,
-        daily_rate_lines,
-        daily_target_rules,
-    )
-    .resolve_scale(
-        y="independent",
-        color="independent",
-    )
-    .properties(height=400)
-)
-
-st.altair_chart(daily_chart, use_container_width=True)
-
-st.caption(
-    "Bars show each day's hourly, GM, and DM labor dollars, "
-    "with the largest segment at the bottom. The line is "
-    "total labor as a percent of net sales, and the dashed "
-    "line is the total labor target. Low-volume days carry "
-    "the same fixed salary as busy days, so the labor rate "
-    "usually spikes on the slowest days."
-)
 
 
 # ---------------------------------------------------------

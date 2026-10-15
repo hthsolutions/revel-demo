@@ -431,6 +431,56 @@ def build_labor_period_frame(
     )
 
 
+def rows_in_periods(
+    frame: pd.DataFrame,
+    date_end,
+    period_days: int,
+    duration: int,
+) -> pd.DataFrame:
+    """Keep rows inside the selected periods and tag each one.
+
+    period_index 0 is the bucket that ends on date_end, matching
+    the labor rate chart.
+    """
+
+    tagged = frame.copy()
+
+    if tagged.empty:
+        tagged["period_index"] = pd.Series(dtype="int64")
+        return tagged
+
+    date_end = pd.Timestamp(date_end).normalize()
+    period_days = int(period_days)
+    duration = int(duration)
+    history_start = date_end - pd.Timedelta(
+        days=period_days * duration - 1
+    )
+
+    tagged["business_date"] = pd.to_datetime(
+        tagged["business_date"]
+    ).dt.normalize()
+    tagged = tagged.loc[
+        tagged["business_date"].between(
+            history_start,
+            date_end,
+            inclusive="both",
+        )
+    ].copy()
+
+    if tagged.empty:
+        tagged["period_index"] = pd.Series(dtype="int64")
+        return tagged
+
+    tagged["period_index"] = (
+        (date_end - tagged["business_date"]).dt.days
+        // period_days
+    ).astype(int)
+
+    return tagged.loc[
+        tagged["period_index"].between(0, duration - 1)
+    ].copy()
+
+
 st.title("Labor % of Net Sales")
 st.caption(
     "Hourly shift wages plus prorated GM and DM salary, "
@@ -679,8 +729,9 @@ selected_interval = st.sidebar.selectbox(
     help=(
         "Periods are counted backward from Date end. "
         "A week is 7 days and a month is 30 days. "
-        "This sets the summary metrics and the "
-        "Labor Dollars and Labor Rate chart."
+        "This sets the summary metrics, the "
+        "Labor Dollars and Labor Rate chart, and "
+        "Labor Dollars by Role."
     ),
 )
 
@@ -708,7 +759,7 @@ date_end = st.sidebar.date_input(
     key=date_key,
     help=(
         "Last business date included in the summary "
-        "and the labor rate chart."
+        "and the labor charts."
     ),
 )
 
@@ -1594,6 +1645,199 @@ visible_daily_df = labor_df[
     labor_df["week_start"].isin(visible_week_starts)
 ].copy()
 
+# ---------------------------------------------------------
+# Labor dollars by role
+# ---------------------------------------------------------
+
+st.subheader("Labor Dollars by Role")
+
+role_frames = []
+role_window_ready = date_end is not None and not rate_df.empty
+
+if not role_window_ready:
+    st.info("Pick a date end to see labor dollars by role.")
+else:
+    if not shift_df.empty:
+        hourly_roles_df = shift_df.copy()
+
+        if selected_location != "All Locations":
+            hourly_roles_df = hourly_roles_df[
+                hourly_roles_df["location"] == selected_location
+            ]
+
+        hourly_roles_df = rows_in_periods(
+            hourly_roles_df,
+            date_end,
+            period_days,
+            duration,
+        )
+
+        if not hourly_roles_df.empty:
+            # GM and DM are paid from the salary feed. Shift
+            # rows for those roles are zero-dollar duplicates.
+            salaried_roles = salaried_role_keys(salary_df)
+            shift_role_key = (
+                hourly_roles_df["role"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.upper()
+            )
+            hourly_roles_df = hourly_roles_df.loc[
+                ~shift_role_key.isin(salaried_roles)
+            ].copy()
+
+        if not hourly_roles_df.empty:
+            hourly_roles_df["role"] = (
+                hourly_roles_df["role"]
+                .fillna("Unassigned")
+                .astype(str)
+                .str.strip()
+            )
+            role_frames.append(
+                hourly_roles_df
+                .groupby(["period_index", "role"], as_index=False)
+                .agg(labor_dollars=("shift_wages", "sum"))
+            )
+
+    if not salary_df.empty:
+        salary_roles_df = salary_df.copy()
+
+        # The salary table stores names in upper case, so it is
+        # matched on the shared location key.
+        if selected_location != "All Locations":
+            selected_key = selected_location.upper()
+            salary_roles_df = salary_roles_df[
+                salary_roles_df["location_key"] == selected_key
+            ]
+
+        salary_roles_df = rows_in_periods(
+            salary_roles_df,
+            date_end,
+            period_days,
+            duration,
+        )
+
+        if not salary_roles_df.empty:
+            salary_roles_df = (
+                salary_roles_df
+                .groupby(
+                    ["period_index", "role"],
+                    as_index=False,
+                )
+                .agg(labor_dollars=("daily_salary", "sum"))
+            )
+            salary_roles_df["role"] = (
+                salary_roles_df["role"].astype(str).str.strip()
+            )
+            role_frames.append(salary_roles_df)
+
+    if not role_frames:
+        st.info(
+            "No role-level labor records fall inside the "
+            "selected date range."
+        )
+    else:
+        role_df = (
+            pd.concat(role_frames, ignore_index=True)
+            .groupby(["period_index", "role"], as_index=False)
+            .agg(labor_dollars=("labor_dollars", "sum"))
+        )
+        role_df = role_df[role_df["labor_dollars"] > 0].copy()
+
+        if role_df.empty:
+            st.info(
+                "No role-level labor records fall inside the "
+                "selected date range."
+            )
+        else:
+            period_labels = rate_df[
+                [
+                    "period_index",
+                    "period_label",
+                    "period_range",
+                    "is_complete",
+                ]
+            ]
+            role_df = role_df.merge(
+                period_labels,
+                on="period_index",
+                how="inner",
+            )
+            role_df, role_order = rank_stack(
+                role_df,
+                "role",
+                "labor_dollars",
+            )
+            period_label_order = rate_df["period_label"].tolist()
+            label_angle = -40 if duration > 6 else 0
+
+            role_chart = (
+                alt.Chart(role_df)
+                .mark_bar()
+                .encode(
+                    x=alt.X(
+                        "period_label:N",
+                        title=interval["x_title"],
+                        sort=period_label_order,
+                        scale=alt.Scale(domain=period_label_order),
+                        axis=alt.Axis(
+                            labelAngle=label_angle,
+                            labelOverlap="greedy",
+                        ),
+                    ),
+                    y=alt.Y(
+                        "labor_dollars:Q",
+                        title="Labor Dollars",
+                        stack="zero",
+                        axis=alt.Axis(format="$,.0f"),
+                    ),
+                    order=alt.Order(
+                        "stack_rank:Q",
+                        sort="ascending",
+                    ),
+                    color=alt.Color(
+                        "role:N",
+                        title="Role",
+                        scale=alt.Scale(scheme="tableau10"),
+                        sort=role_order,
+                    ),
+                    opacity=alt.condition(
+                        alt.datum.is_complete,
+                        alt.value(0.85),
+                        alt.value(0.4),
+                    ),
+                    tooltip=[
+                        alt.Tooltip(
+                            "period_range:N",
+                            title="Period",
+                        ),
+                        alt.Tooltip("role:N", title="Role"),
+                        alt.Tooltip(
+                            "labor_dollars:Q",
+                            title="Labor Dollars",
+                            format="$,.0f",
+                        ),
+                    ],
+                )
+                .properties(height=400)
+            )
+
+            st.altair_chart(
+                role_chart,
+                use_container_width=True,
+            )
+
+            st.caption(
+                "Each bar uses the same periods as the chart "
+                "above. Role totals cover every day with a labor "
+                "record in that period, including days the sales "
+                "feed has not reported, so they can exceed the "
+                "labor totals above. The largest role sits at "
+                "the bottom of each bar."
+            )
+
+
 current_week_label = (
     f"{current_week['week_start']:%b %d}–"
     f"{current_week['week_start'] + timedelta(days=6):%b %d, %Y}"
@@ -1606,8 +1850,8 @@ if latest_week_is_partial:
         st.caption(
             f"The week of {current_week_label} has "
             f"{days_in_current_week} day(s) of labor data. "
-            "The role, overtime, and table sections trim "
-            "every week to the same days."
+            "The overtime and table sections trim every week "
+            "to the same days."
         )
     else:
         st.caption(
@@ -1632,170 +1876,6 @@ if (
         "week-to-date comparison is empty. Turn off "
         "\"Compare week to date\" to compare whole weeks."
     )
-
-
-# ---------------------------------------------------------
-# Labor dollars by role
-# ---------------------------------------------------------
-
-st.subheader("Labor Dollars by Role")
-
-role_frames = []
-
-if not shift_df.empty:
-    hourly_roles_df = shift_df.copy()
-
-    if selected_location != "All Locations":
-        hourly_roles_df = hourly_roles_df[
-            hourly_roles_df["location"] == selected_location
-        ]
-
-    hourly_roles_df = add_week_columns(
-        hourly_roles_df,
-        week_start_weekday,
-    )
-
-    hourly_roles_df = hourly_roles_df[
-        hourly_roles_df["week_start"].isin(
-            visible_week_starts
-        )
-    ]
-
-    if not hourly_roles_df.empty:
-        # GM and DM are paid from the salary feed. Shift
-        # rows for those roles are zero-dollar duplicates.
-        salaried_roles = salaried_role_keys(salary_df)
-        shift_role_key = (
-            hourly_roles_df["role"]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .str.upper()
-        )
-        hourly_roles_df = hourly_roles_df.loc[
-            ~shift_role_key.isin(salaried_roles)
-        ].copy()
-
-    if not hourly_roles_df.empty:
-        hourly_roles_df["role"] = (
-            hourly_roles_df["role"]
-            .fillna("Unassigned")
-            .astype(str)
-            .str.strip()
-        )
-        role_frames.append(
-            hourly_roles_df
-            .groupby(["week_start", "role"], as_index=False)
-            .agg(labor_dollars=("shift_wages", "sum"))
-        )
-
-if not salary_df.empty:
-    salary_roles_df = salary_df.copy()
-
-    # The salary table stores names in upper case, so it is
-    # matched on the shared location key.
-    if selected_location != "All Locations":
-        selected_key = selected_location.upper()
-        salary_roles_df = salary_roles_df[
-            salary_roles_df["location_key"] == selected_key
-        ]
-
-    salary_roles_df = add_week_columns(
-        salary_roles_df,
-        week_start_weekday,
-    )
-
-    salary_roles_df = salary_roles_df[
-        salary_roles_df["week_start"].isin(
-            visible_week_starts
-        )
-    ]
-
-    if not salary_roles_df.empty:
-        salary_roles_df = (
-            salary_roles_df
-            .groupby(["week_start", "role"], as_index=False)
-            .agg(labor_dollars=("daily_salary", "sum"))
-        )
-        salary_roles_df["role"] = (
-            salary_roles_df["role"].astype(str).str.strip()
-        )
-        role_frames.append(salary_roles_df)
-
-if not role_frames:
-    st.info(
-        "No role-level labor records fall inside the "
-        "selected weeks."
-    )
-else:
-    role_df = (
-        pd.concat(role_frames, ignore_index=True)
-        .groupby(["week_start", "role"], as_index=False)
-        .agg(labor_dollars=("labor_dollars", "sum"))
-    )
-    role_df = role_df[role_df["labor_dollars"] > 0].copy()
-
-    if role_df.empty:
-        st.info(
-            "No role-level labor records fall inside the "
-            "selected weeks."
-        )
-    else:
-        role_df["week_label"] = role_df[
-            "week_start"
-        ].dt.strftime("%b %d")
-        role_df, role_order = rank_stack(
-            role_df,
-            "role",
-            "labor_dollars",
-        )
-
-        role_chart = (
-            alt.Chart(role_df)
-            .mark_bar()
-            .encode(
-                x=alt.X(
-                    "week_label:N",
-                    title="Week Starting",
-                    sort=week_label_order,
-                ),
-                y=alt.Y(
-                    "labor_dollars:Q",
-                    title="Labor Dollars",
-                    stack="zero",
-                    axis=alt.Axis(format="$,.0f"),
-                ),
-                order=alt.Order("stack_rank:Q", sort="ascending"),
-                color=alt.Color(
-                    "role:N",
-                    title="Role",
-                    scale=alt.Scale(scheme="tableau10"),
-                    sort=role_order,
-                ),
-                tooltip=[
-                    alt.Tooltip(
-                        "week_label:N",
-                        title="Week Starting",
-                    ),
-                    alt.Tooltip("role:N", title="Role"),
-                    alt.Tooltip(
-                        "labor_dollars:Q",
-                        title="Labor Dollars",
-                        format="$,.0f",
-                    ),
-                ],
-            )
-            .properties(height=400)
-        )
-
-        st.altair_chart(role_chart, use_container_width=True)
-
-        st.caption(
-            "Role totals cover every day with a labor record, "
-            "including days the sales feed has not reported, so "
-            "they can exceed the weekly totals above. The "
-            "largest role sits at the bottom of each bar."
-        )
 
 
 # ---------------------------------------------------------

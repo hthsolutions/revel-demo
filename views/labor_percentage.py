@@ -729,9 +729,10 @@ selected_interval = st.sidebar.selectbox(
     help=(
         "Periods are counted backward from Date end. "
         "A week is 7 days and a month is 30 days. "
-        "This sets the summary metrics, the "
-        "Labor Dollars and Labor Rate chart, and "
-        "Labor Dollars by Role."
+        "This sets the summary metrics and the "
+        "labor charts: Labor Dollars and Labor Rate, "
+        "Labor Dollars by Role, and Total OT Labor $ "
+        "per Period."
     ),
 )
 
@@ -1079,21 +1080,7 @@ weekly_df["labor_percent_change"] = (
     - weekly_df["previous_labor_percent"]
 )
 
-weekly_df["week_label"] = weekly_df[
-    "week_start"
-].dt.strftime("%b %d")
-
-expected_days_per_week = (
-    latest_week_day_index + 1 if week_to_date_applied else 7
-)
-
-weekly_df["is_complete_week"] = (
-    weekly_df["days_counted"] >= expected_days_per_week
-)
-
 visible_weeks_df = weekly_df.tail(weeks_to_display).copy()
-
-week_label_order = visible_weeks_df["week_label"].tolist()
 
 current_week = weekly_df.iloc[-1]
 
@@ -1838,6 +1825,326 @@ else:
             )
 
 
+# ---------------------------------------------------------
+# Total overtime labor dollars and hours
+# ---------------------------------------------------------
+
+st.subheader("Total OT Labor $ per Period")
+
+if date_end is None or rate_df.empty:
+    st.info("Pick a date end to see overtime by period.")
+else:
+    labor_period_days = rows_in_periods(
+        labor_df,
+        date_end,
+        period_days,
+        duration,
+    )
+    counted_ot_days = (
+        labor_period_days[
+            ["business_date", "location_key", "period_index"]
+        ]
+        .drop_duplicates()
+    )
+
+    ot_role_df = pd.DataFrame(
+        columns=[
+            "period_index",
+            "role",
+            "ot_labor",
+            "ot_hours",
+        ]
+    )
+
+    if not shift_df.empty and not counted_ot_days.empty:
+        ot_role_source = shift_df.copy()
+
+        if selected_location != "All Locations":
+            ot_role_source = ot_role_source[
+                ot_role_source["location"] == selected_location
+            ]
+
+        ot_role_source = rows_in_periods(
+            ot_role_source,
+            date_end,
+            period_days,
+            duration,
+        )
+        ot_role_source = ot_role_source.merge(
+            counted_ot_days,
+            on=["business_date", "location_key", "period_index"],
+            how="inner",
+        )
+
+        if not ot_role_source.empty:
+            ot_role_df = (
+                ot_role_source
+                .groupby(
+                    ["period_index", "role"],
+                    as_index=False,
+                )
+                .agg(
+                    ot_labor=("ot_wages", "sum"),
+                    ot_hours=("ot_hours", "sum"),
+                )
+            )
+            ot_role_df = ot_role_df[
+                (ot_role_df["ot_labor"] > 0)
+                | (ot_role_df["ot_hours"] > 0)
+            ].copy()
+
+    period_labels = rate_df[
+        [
+            "period_index",
+            "period_label",
+            "period_range",
+            "is_complete",
+            "total_labor",
+        ]
+    ].copy()
+
+    if not ot_role_df.empty:
+        ot_role_df = ot_role_df.merge(
+            period_labels[
+                [
+                    "period_index",
+                    "period_label",
+                    "period_range",
+                    "is_complete",
+                ]
+            ],
+            on="period_index",
+            how="inner",
+        )
+
+    ot_by_period = (
+        labor_period_days
+        .groupby("period_index", as_index=False)
+        .agg(ot_labor=("ot_labor", "sum"))
+        if not labor_period_days.empty
+        else pd.DataFrame(
+            columns=["period_index", "ot_labor"]
+        )
+    )
+
+    ot_percent_df = period_labels[
+        [
+            "period_index",
+            "period_label",
+            "period_range",
+            "total_labor",
+        ]
+    ].merge(
+        ot_by_period,
+        on="period_index",
+        how="left",
+    )
+
+    # Total OT hours on this chart leave out the GM role.
+    # Overtime dollars stay as recorded, including GM.
+    if not ot_role_df.empty:
+        non_gm_ot_hours = (
+            ot_role_df.loc[
+                ot_role_df["role"]
+                .astype(str)
+                .str.strip()
+                .str.upper()
+                != "GM",
+                ["period_index", "ot_hours"],
+            ]
+            .groupby("period_index", as_index=False)["ot_hours"]
+            .sum()
+        )
+    else:
+        non_gm_ot_hours = pd.DataFrame(
+            columns=["period_index", "ot_hours"]
+        )
+
+    ot_percent_df = ot_percent_df.merge(
+        non_gm_ot_hours,
+        on="period_index",
+        how="left",
+    )
+    reported_period = ot_percent_df["total_labor"].notna()
+    ot_percent_df.loc[reported_period, "ot_labor"] = (
+        ot_percent_df.loc[reported_period, "ot_labor"].fillna(0.0)
+    )
+    ot_percent_df.loc[reported_period, "ot_hours"] = (
+        ot_percent_df.loc[reported_period, "ot_hours"].fillna(0.0)
+    )
+    ot_percent_df["ot_labor_percent"] = (
+        safe_ratio(
+            ot_percent_df["ot_labor"],
+            ot_percent_df["total_labor"],
+        )
+        * 100
+    )
+
+    stacked_ot_peak = (
+        ot_role_df.groupby("period_label")["ot_labor"].sum().max()
+        if not ot_role_df.empty
+        else 0.0
+    )
+    period_ot_peak = ot_percent_df["ot_labor"].max()
+    ot_labor_candidates = [
+        float(value)
+        for value in [stacked_ot_peak, period_ot_peak]
+        if pd.notna(value)
+    ]
+    ot_labor_peak = max(ot_labor_candidates, default=0.0)
+
+    if ot_labor_peak <= 0:
+        ot_labor_axis_max = 1.0
+    else:
+        ot_labor_axis_max = ot_labor_peak * 1.08
+
+    ot_labor_scale = alt.Scale(domain=[0, ot_labor_axis_max])
+    period_label_order = rate_df["period_label"].tolist()
+    label_angle = -40 if duration > 6 else 0
+    ot_period_axis = alt.X(
+        "period_label:N",
+        title=interval["x_title"],
+        sort=period_label_order,
+        scale=alt.Scale(domain=period_label_order),
+        axis=alt.Axis(
+            labelAngle=label_angle,
+            labelOverlap="greedy",
+        ),
+    )
+
+    ot_chart_layers = []
+
+    if not ot_role_df.empty:
+        ot_labor_bars = (
+            alt.Chart(ot_role_df)
+            .mark_bar()
+            .encode(
+                x=ot_period_axis,
+                y=alt.Y(
+                    "ot_labor:Q",
+                    title="Total OT Labor $",
+                    stack="zero",
+                    axis=alt.Axis(format="$,.0f"),
+                    scale=ot_labor_scale,
+                ),
+                color=alt.Color(
+                    "role:N",
+                    title="Role",
+                    scale=alt.Scale(scheme="tableau10"),
+                    sort="ascending",
+                ),
+                order=alt.Order("role:N", sort="ascending"),
+                opacity=alt.condition(
+                    alt.datum.is_complete,
+                    alt.value(0.85),
+                    alt.value(0.4),
+                ),
+                tooltip=[
+                    alt.Tooltip(
+                        "period_range:N",
+                        title="Period",
+                    ),
+                    alt.Tooltip("role:N", title="Role"),
+                    alt.Tooltip(
+                        "ot_hours:Q",
+                        title="OT Hours",
+                        format=",.1f",
+                    ),
+                    alt.Tooltip(
+                        "ot_labor:Q",
+                        title="OT Labor $",
+                        format="$,.0f",
+                    ),
+                ],
+            )
+        )
+        ot_chart_layers.append(ot_labor_bars)
+
+    ot_percent_peak = ot_percent_df["ot_labor_percent"].max()
+
+    if pd.isna(ot_percent_peak) or ot_percent_peak <= 0:
+        ot_percent_axis_max = 1.0
+    else:
+        ot_percent_axis_max = float(ot_percent_peak) * 1.08
+
+    ot_percent_scale = alt.Scale(
+        domain=[0, ot_percent_axis_max],
+    )
+
+    ot_percent_line = (
+        alt.Chart(ot_percent_df)
+        .mark_line(
+            color="#6a3d9a",
+            strokeWidth=2.5,
+            point=alt.OverlayMarkDef(
+                size=55,
+                color="#6a3d9a",
+            ),
+        )
+        .encode(
+            x=ot_period_axis,
+            y=alt.Y(
+                "ot_labor_percent:Q",
+                title="$ OT % of Total Labor Dollars",
+                axis=alt.Axis(
+                    orient="right",
+                    format=".1f",
+                    labelExpr="datum.value + '%'",
+                    titleColor="#6a3d9a",
+                    labelColor="#6a3d9a",
+                    grid=False,
+                ),
+                scale=ot_percent_scale,
+            ),
+            tooltip=[
+                alt.Tooltip(
+                    "period_range:N",
+                    title="Period",
+                ),
+                alt.Tooltip(
+                    "ot_labor_percent:Q",
+                    title="$ OT % of Total Labor Dollars",
+                    format=".1f",
+                ),
+                alt.Tooltip(
+                    "ot_hours:Q",
+                    title="OT Hours",
+                    format=",.1f",
+                ),
+                alt.Tooltip(
+                    "ot_labor:Q",
+                    title="OT Labor $",
+                    format="$,.0f",
+                ),
+                alt.Tooltip(
+                    "total_labor:Q",
+                    title="Total Labor $",
+                    format="$,.0f",
+                ),
+            ],
+        )
+    )
+
+    ot_chart_layers.append(ot_percent_line)
+
+    ot_labor_chart = (
+        alt.layer(*ot_chart_layers)
+        .resolve_scale(y="independent")
+        .properties(height=400)
+    )
+
+    st.altair_chart(ot_labor_chart, use_container_width=True)
+
+    st.caption(
+        "Each bar uses the same periods as the charts above. "
+        "Bars are overtime pay on the left axis, split by "
+        "role. Hover a segment for that role's overtime hours "
+        "and overtime pay. The right axis is overtime pay "
+        "as a percent of total labor. Total OT hours on the "
+        "line exclude the GM role."
+    )
+
+
 current_week_label = (
     f"{current_week['week_start']:%b %d}–"
     f"{current_week['week_start'] + timedelta(days=6):%b %d, %Y}"
@@ -1850,8 +2157,7 @@ if latest_week_is_partial:
         st.caption(
             f"The week of {current_week_label} has "
             f"{days_in_current_week} day(s) of labor data. "
-            "The overtime and table sections trim every week "
-            "to the same days."
+            "The tables below trim every week to the same days."
         )
     else:
         st.caption(
@@ -1876,270 +2182,6 @@ if (
         "week-to-date comparison is empty. Turn off "
         "\"Compare week to date\" to compare whole weeks."
     )
-
-
-# ---------------------------------------------------------
-# Total overtime labor dollars and hours
-# ---------------------------------------------------------
-
-st.subheader("Total OT Labor $ per Week")
-
-# Role segments use the same days as the weekly totals,
-# including the week-to-date trim, so the stack matches
-# the overtime dollars and hours already on this page.
-counted_ot_days = (
-    comparison_df.loc[
-        comparison_df["week_start"].isin(visible_week_starts),
-        ["business_date", "location_key"],
-    ]
-    .drop_duplicates()
-)
-
-ot_role_df = pd.DataFrame(
-    columns=["week_start", "role", "ot_labor", "ot_hours"]
-)
-
-if not shift_df.empty and not counted_ot_days.empty:
-    ot_role_source = shift_df.copy()
-
-    if selected_location != "All Locations":
-        ot_role_source = ot_role_source[
-            ot_role_source["location"] == selected_location
-        ]
-
-    ot_role_source = add_week_columns(
-        ot_role_source,
-        week_start_weekday,
-    )
-    ot_role_source = ot_role_source.merge(
-        counted_ot_days,
-        on=["business_date", "location_key"],
-        how="inner",
-    )
-
-    if not ot_role_source.empty:
-        ot_role_df = (
-            ot_role_source
-            .groupby(["week_start", "role"], as_index=False)
-            .agg(
-                ot_labor=("ot_wages", "sum"),
-                ot_hours=("ot_hours", "sum"),
-            )
-        )
-        ot_role_df = ot_role_df[
-            (ot_role_df["ot_labor"] > 0)
-            | (ot_role_df["ot_hours"] > 0)
-        ].copy()
-
-if not ot_role_df.empty:
-    ot_role_df["week_start"] = pd.to_datetime(
-        ot_role_df["week_start"]
-    ).dt.normalize()
-    ot_week_labels = visible_weeks_df[
-        ["week_start", "week_label", "is_complete_week"]
-    ].copy()
-    ot_week_labels["week_start"] = pd.to_datetime(
-        ot_week_labels["week_start"]
-    ).dt.normalize()
-    ot_role_df = ot_role_df.merge(
-        ot_week_labels,
-        on="week_start",
-        how="inner",
-    )
-
-stacked_ot_peak = (
-    ot_role_df.groupby("week_label")["ot_labor"].sum().max()
-    if not ot_role_df.empty
-    else 0.0
-)
-weekly_ot_peak = visible_weeks_df["ot_labor"].max()
-ot_labor_candidates = [
-    stacked_ot_peak,
-    weekly_ot_peak,
-]
-ot_labor_candidates = [
-    float(value)
-    for value in ot_labor_candidates
-    if pd.notna(value)
-]
-ot_labor_peak = max(ot_labor_candidates, default=0.0)
-
-if pd.isna(ot_labor_peak) or ot_labor_peak <= 0:
-    ot_labor_axis_max = 1.0
-else:
-    ot_labor_axis_max = float(ot_labor_peak) * 1.08
-
-ot_labor_scale = alt.Scale(domain=[0, ot_labor_axis_max])
-
-ot_chart_layers = []
-
-if not ot_role_df.empty:
-    ot_labor_bars = (
-        alt.Chart(ot_role_df)
-        .mark_bar()
-        .encode(
-            x=alt.X(
-                "week_label:N",
-                title="Week Starting",
-                sort=week_label_order,
-            ),
-            y=alt.Y(
-                "ot_labor:Q",
-                title="Total OT Labor $",
-                stack="zero",
-                axis=alt.Axis(format="$,.0f"),
-                scale=ot_labor_scale,
-            ),
-            color=alt.Color(
-                "role:N",
-                title="Role",
-                scale=alt.Scale(scheme="tableau10"),
-                sort="ascending",
-            ),
-            order=alt.Order("role:N", sort="ascending"),
-            opacity=alt.condition(
-                alt.datum.is_complete_week,
-                alt.value(0.85),
-                alt.value(0.4),
-            ),
-            tooltip=[
-                alt.Tooltip(
-                    "week_label:N",
-                    title="Week Starting",
-                ),
-                alt.Tooltip("role:N", title="Role"),
-                alt.Tooltip(
-                    "ot_hours:Q",
-                    title="OT Hours",
-                    format=",.1f",
-                ),
-                alt.Tooltip(
-                    "ot_labor:Q",
-                    title="OT Labor $",
-                    format="$,.0f",
-                ),
-            ],
-        )
-    )
-    ot_chart_layers.append(ot_labor_bars)
-
-ot_percent_df = visible_weeks_df[
-    ["week_label", "ot_labor", "ot_hours", "total_labor"]
-].copy()
-
-# Total OT hours on this chart leave out the GM role.
-# Overtime dollars stay as recorded, including GM.
-if not ot_role_df.empty:
-    non_gm_ot_hours = (
-        ot_role_df.loc[
-            ot_role_df["role"].astype(str).str.strip().str.upper()
-            != "GM",
-            ["week_label", "ot_hours"],
-        ]
-        .groupby("week_label", as_index=False)["ot_hours"]
-        .sum()
-    )
-    ot_percent_df = ot_percent_df.drop(columns=["ot_hours"]).merge(
-        non_gm_ot_hours,
-        on="week_label",
-        how="left",
-    )
-    ot_percent_df["ot_hours"] = ot_percent_df["ot_hours"].fillna(0.0)
-
-ot_percent_df["ot_labor_percent"] = (
-    safe_ratio(
-        ot_percent_df["ot_labor"],
-        ot_percent_df["total_labor"],
-    )
-    * 100
-)
-
-ot_percent_peak = ot_percent_df["ot_labor_percent"].max()
-
-if pd.isna(ot_percent_peak) or ot_percent_peak <= 0:
-    ot_percent_axis_max = 1.0
-else:
-    ot_percent_axis_max = float(ot_percent_peak) * 1.08
-
-ot_percent_scale = alt.Scale(
-    domain=[0, ot_percent_axis_max],
-)
-
-ot_percent_line = (
-    alt.Chart(ot_percent_df)
-    .mark_line(
-        color="#6a3d9a",
-        strokeWidth=2.5,
-        point=alt.OverlayMarkDef(
-            size=55,
-            color="#6a3d9a",
-        ),
-    )
-    .encode(
-        x=alt.X(
-            "week_label:N",
-            title="Week Starting",
-            sort=week_label_order,
-        ),
-        y=alt.Y(
-            "ot_labor_percent:Q",
-            title="$ OT % of Total Labor Dollars",
-            axis=alt.Axis(
-                orient="right",
-                format=".1f",
-                labelExpr="datum.value + '%'",
-                titleColor="#6a3d9a",
-                labelColor="#6a3d9a",
-                grid=False,
-            ),
-            scale=ot_percent_scale,
-        ),
-        tooltip=[
-            alt.Tooltip(
-                "week_label:N",
-                title="Week Starting",
-            ),
-            alt.Tooltip(
-                "ot_labor_percent:Q",
-                title="$ OT % of Total Labor Dollars",
-                format=".1f",
-            ),
-            alt.Tooltip(
-                "ot_hours:Q",
-                title="OT Hours",
-                format=",.1f",
-            ),
-            alt.Tooltip(
-                "ot_labor:Q",
-                title="OT Labor $",
-                format="$,.0f",
-            ),
-            alt.Tooltip(
-                "total_labor:Q",
-                title="Total Labor $",
-                format="$,.0f",
-            ),
-        ],
-    )
-)
-
-ot_chart_layers.append(ot_percent_line)
-
-ot_labor_chart = (
-    alt.layer(*ot_chart_layers)
-    .resolve_scale(y="independent")
-    .properties(height=400)
-)
-
-st.altair_chart(ot_labor_chart, use_container_width=True)
-
-st.caption(
-    "Bars are overtime pay on the left axis, split by "
-    "role. Hover a segment for that role's overtime hours "
-    "and overtime pay. The right axis is overtime pay "
-    "as a percent of total labor. Total OT hours on the "
-    "line exclude the GM role."
-)
 
 
 # ---------------------------------------------------------

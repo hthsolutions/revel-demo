@@ -46,13 +46,6 @@ BAR_TYPE_LABELS = {
     "dm_labor": "DM",
 }
 
-RATE_SERIES = {
-    "hourly_percent": "Hourly",
-    "gm_percent": "GM",
-    "dm_percent": "DM",
-    "labor_percent": "Total",
-}
-
 SEGMENT_COLORS = {
     "Hourly": "#1f77b4",
     "GM": "#9467bd",
@@ -585,21 +578,9 @@ labor_df["other_percent"] = (
 )
 
 bar_type_labels = dict(BAR_TYPE_LABELS)
-rate_series = dict(RATE_SERIES)
 
 if float(labor_df["other_salary_labor"].sum()) > 0:
     bar_type_labels["other_salary_labor"] = "Other salary"
-    rate_series["other_percent"] = "Other salary"
-
-bar_color_scale = color_scale(list(bar_type_labels.values()))
-rate_color_scale = color_scale(list(rate_series.values()))
-rate_order = list(rate_series.values())
-target_values = [
-    float(hourly_target_percent),
-    float(gm_target_percent),
-    float(dm_target_percent),
-    float(target_labor_percent),
-]
 
 labor_df["sales_per_labor_hour"] = safe_ratio(
     labor_df["net_sales"],
@@ -970,27 +951,31 @@ else:
 
 percent_axis_min, percent_axis_max = percent_axis_limits(
     visible_weeks_df,
-    list(rate_series.keys()),
-    target_values,
+    ["labor_percent"],
+    [float(target_labor_percent)],
 )
 
 target_df = pd.DataFrame(
     {
-        "rate_series": ["Hourly", "GM", "DM", "Total"],
-        "target": target_values,
+        "rate_series": ["Total"],
+        "target": [float(target_labor_percent)],
     }
 )
 
-weekly_stacked_df = stack_labor_types(
-    visible_weeks_df,
-    [
-        "week_label",
-        "is_complete_week",
-        "total_labor",
-        "net_sales",
-        "days_counted",
-    ],
-    bar_type_labels,
+weekly_stacked_df, weekly_type_order = rank_stack(
+    stack_labor_types(
+        visible_weeks_df,
+        [
+            "week_label",
+            "is_complete_week",
+            "total_labor",
+            "net_sales",
+            "days_counted",
+        ],
+        bar_type_labels,
+    ),
+    "labor_type",
+    "labor_dollars",
 )
 
 labor_dollar_bars = (
@@ -1009,11 +994,12 @@ labor_dollar_bars = (
             axis=alt.Axis(format="$,.0f"),
             scale=alt.Scale(domain=[0, labor_axis_max]),
         ),
+        order=alt.Order("stack_rank:Q", sort="ascending"),
         color=alt.Color(
             "labor_type:N",
             title="Labor Type",
-            scale=bar_color_scale,
-            sort=list(bar_type_labels.values()),
+            scale=color_scale(weekly_type_order),
+            sort=weekly_type_order,
         ),
         opacity=alt.condition(
             alt.datum.is_complete_week,
@@ -1053,8 +1039,10 @@ labor_dollar_bars = (
 weekly_rates_df = melt_labor_rates(
     visible_weeks_df,
     ["week_label"],
-    rate_series,
+    {"labor_percent": "Total"},
 )
+
+total_rate_scale = color_scale(["Total"])
 
 percent_scale = alt.Scale(
     domain=[percent_axis_min, percent_axis_max],
@@ -1086,8 +1074,8 @@ labor_rate_lines = (
         color=alt.Color(
             "rate_series:N",
             title="Labor %",
-            scale=rate_color_scale,
-            sort=rate_order,
+            scale=total_rate_scale,
+            legend=None,
         ),
         tooltip=[
             alt.Tooltip(
@@ -1173,7 +1161,7 @@ target_rules = (
         ),
         color=alt.Color(
             "rate_series:N",
-            scale=rate_color_scale,
+            scale=total_rate_scale,
             legend=None,
         ),
         tooltip=[
@@ -1210,11 +1198,11 @@ st.altair_chart(
 )
 
 st.caption(
-    "Bars show labor dollars on the left axis, split into "
-    "hourly, GM, and DM pay. Lines on the inner right axis "
-    "are hourly, GM, DM, and total labor as a percent of "
-    "net sales. Each dashed line is that series' target. "
-    "The outer right axis, in teal, is net sales."
+    "Bars show hourly, GM, and DM labor dollars, with the "
+    "largest segment at the bottom. The line is total labor "
+    "as a percent of net sales, and the dashed line is the "
+    "total labor target. The outer right axis, in teal, is "
+    "net sales."
 )
 
 
@@ -1317,8 +1305,6 @@ daily_percent_min, daily_percent_max = percent_axis_limits(
     ["labor_percent"],
     [float(target_labor_percent)],
 )
-
-total_rate_scale = color_scale(["Total"])
 
 daily_percent_scale = alt.Scale(
     domain=[daily_percent_min, daily_percent_max],

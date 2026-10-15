@@ -1095,14 +1095,24 @@ labor_rate_lines = (
     )
 )
 
-net_sales_peak = visible_weeks_df["net_sales"].max()
+net_sales_values = visible_weeks_df["net_sales"].dropna()
 
-if pd.isna(net_sales_peak) or net_sales_peak <= 0:
+if net_sales_values.empty:
+    net_sales_axis_min = 0.0
     net_sales_axis_max = 1.0
 else:
-    net_sales_axis_max = float(net_sales_peak) * 2
+    lowest_net_sales = float(net_sales_values.min())
+    highest_net_sales = float(net_sales_values.max())
+    net_sales_axis_min = lowest_net_sales * 0.75
+    net_sales_axis_max = highest_net_sales * 1.25
+    if net_sales_axis_max <= net_sales_axis_min:
+        net_sales_axis_max = net_sales_axis_min + 1.0
 
-net_sales_scale = alt.Scale(domain=[0, net_sales_axis_max])
+net_sales_scale = alt.Scale(
+    domain=[net_sales_axis_min, net_sales_axis_max],
+    zero=False,
+    nice=False,
+)
 
 net_sales_line = (
     alt.Chart(visible_weeks_df)
@@ -1202,7 +1212,8 @@ st.caption(
     "largest segment at the bottom. The line is total labor "
     "as a percent of net sales, and the dashed line is the "
     "total labor target. The outer right axis, in teal, is "
-    "net sales, and its top is twice the highest week shown."
+    "net sales. That axis runs from 75% of the lowest week "
+    "to 125% of the highest week shown."
 )
 
 

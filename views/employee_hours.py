@@ -19,6 +19,14 @@ from revel_data import (
 # and the next midnight at the right.
 DAY_HOUR_SPAN = 24
 STORE_TIMEZONE = ZoneInfo("America/Chicago")
+# Focused day: a label every two hours, from midnight to midnight.
+FOCUS_HOUR_TICKS = list(range(0, DAY_HOUR_SPAN + 1, 2))
+CLOCK_LABEL_EXPR = (
+    "datum.value == 0 || datum.value == 24 ? '12a' "
+    ": datum.value == 12 ? '12p' "
+    ": datum.value < 12 ? datum.value + 'a' "
+    ": (datum.value - 12) + 'p'"
+)
 
 SEGMENT_ORDER = ["Regular", "Overtime"]
 SEGMENT_COLORS = ["#2ca02c", "#d62728"]
@@ -271,6 +279,23 @@ def add_missing_days(
     return pd.concat([frame, placeholders], ignore_index=True)
 
 
+def labels_on_day(
+    frame: pd.DataFrame,
+    day_label: str,
+    employee_order: list[str],
+) -> list[str]:
+    """Employees who have a visible shift on one day, in week order."""
+
+    present = set(
+        frame.loc[
+            (frame["day_label"] == day_label)
+            & (frame["bar_opacity"].fillna(0) > 0),
+            "employee_label",
+        ].dropna()
+    )
+    return [label for label in employee_order if label in present]
+
+
 def hours_chart(
     frame: pd.DataFrame,
     color_domain: list[str],
@@ -279,70 +304,76 @@ def hours_chart(
     employee_order: list[str],
     day_label_order: list[str],
     row_height: int,
+    hour_ticks: list[int] | None = None,
+    clock_labels: bool = False,
+    single_day: bool = False,
 ):
-    """One week of clock bars. Both charts use this layout."""
+    """One week of clock bars, or one day when a day is selected.
+
+    Both charts use this layout so the clocks stay aligned.
+    """
 
     name_axis = alt.Axis(
         labelLimit=Y_LABEL_EXTENT,
         minExtent=Y_LABEL_EXTENT,
         maxExtent=Y_LABEL_EXTENT,
     )
+    ticks = hour_ticks or [0, 12, 24]
+    hour_axis = alt.Axis(
+        values=ticks,
+        labelFlush=True,
+        labelOverlap=False if clock_labels else True,
+        labelExpr=CLOCK_LABEL_EXPR if clock_labels else None,
+    )
+    encodings = dict(
+        y=alt.Y(
+            "employee_label:N",
+            title=None,
+            sort=employee_order,
+            scale=alt.Scale(domain=employee_order),
+            axis=name_axis,
+        ),
+        x=alt.X(
+            "start_hour:Q",
+            title=None,
+            scale=alt.Scale(domain=[0, DAY_HOUR_SPAN]),
+            axis=hour_axis,
+        ),
+        x2="end_hour:Q",
+        opacity=alt.Opacity(
+            "bar_opacity:Q",
+            scale=alt.Scale(domain=[0, 1], range=[0, 1]),
+            legend=None,
+        ),
+        color=alt.Color(
+            "segment:N",
+            title=None,
+            sort=color_domain,
+            scale=alt.Scale(
+                domain=color_domain,
+                range=color_range,
+            ),
+            legend=alt.Legend(orient="top"),
+        ),
+        tooltip=tooltip,
+    )
+    if not single_day:
+        encodings["column"] = alt.Column(
+            "day_label:N",
+            title=None,
+            sort=day_label_order,
+            header=alt.Header(
+                labelOrient="top",
+                labelAlign="center",
+            ),
+            spacing=8,
+        )
+    chart_width = FACET_WIDTH * 7 if single_day else FACET_WIDTH
     return (
         alt.Chart(frame)
         .mark_bar()
-        .encode(
-            y=alt.Y(
-                "employee_label:N",
-                title=None,
-                sort=employee_order,
-                scale=alt.Scale(domain=employee_order),
-                axis=name_axis,
-            ),
-            x=alt.X(
-                "start_hour:Q",
-                title=None,
-                scale=alt.Scale(domain=[0, DAY_HOUR_SPAN]),
-                axis=alt.Axis(
-                    values=[0, 6, 12, 18, 24],
-                    labelFlush=True,
-                    labelOverlap=False,
-                    labelExpr=(
-                        "datum.value == 0 || datum.value == 24 "
-                        "? '12a' : datum.value == 12 ? '12p' "
-                        ": datum.value < 12 ? datum.value + 'a' "
-                        ": (datum.value - 12) + 'p'"
-                    ),
-                ),
-            ),
-            x2="end_hour:Q",
-            opacity=alt.Opacity(
-                "bar_opacity:Q",
-                scale=alt.Scale(domain=[0, 1], range=[0, 1]),
-                legend=None,
-            ),
-            color=alt.Color(
-                "segment:N",
-                title=None,
-                sort=color_domain,
-                scale=alt.Scale(
-                    domain=color_domain,
-                    range=color_range,
-                ),
-                legend=alt.Legend(orient="top"),
-            ),
-            column=alt.Column(
-                "day_label:N",
-                title=None,
-                sort=day_label_order,
-                header=alt.Header(
-                    labelOrient="top",
-                    labelAlign="center",
-                ),
-                spacing=8,
-            ),
-            tooltip=tooltip,
-        )
-        .properties(width=FACET_WIDTH, height=row_height)
+        .encode(**encodings)
+        .properties(width=chart_width, height=row_height)
     )
 
 
@@ -660,43 +691,111 @@ shared_tooltip = [
         format=".2f",
     ),
 ]
-chart_args = dict(
-    employee_order=employee_order,
-    day_label_order=day_label_order,
-    row_height=row_height,
+day_options = ["All days", *day_label_order]
+day_key = "employee_hours_day"
+if (
+    day_key not in st.session_state
+    or st.session_state[day_key] not in day_options
+):
+    st.session_state[day_key] = "All days"
+selected_day = st.pills(
+    "Day",
+    options=day_options,
+    key=day_key,
+    help=(
+        "All days shows the week. Pick one day to open "
+        "that clock with a mark every two hours."
+    ),
 )
-st.subheader("Regular and overtime")
-st.altair_chart(
-    hours_chart(
+focused_day = selected_day not in (None, "All days")
+if focused_day:
+    day_employees = labels_on_day(
         pay_df,
-        SEGMENT_ORDER,
-        SEGMENT_COLORS,
-        [
-            *shared_tooltip,
-            alt.Tooltip("segment:N", title="Hours"),
-        ],
-        **chart_args,
-    ),
-    use_container_width=True,
-)
-st.subheader("Hours by role")
-st.altair_chart(
-    hours_chart(
-        role_df,
-        role_order,
-        role_colors,
-        shared_tooltip,
-        **chart_args,
-    ),
-    use_container_width=True,
-)
+        selected_day,
+        employee_order,
+    )
+    chart_frame_pay = pay_df[
+        pay_df["day_label"] == selected_day
+    ].copy()
+    chart_frame_role = role_df[
+        role_df["day_label"] == selected_day
+    ].copy()
+    chart_employees = day_employees
+    chart_days = [selected_day]
+    chart_height = max(360, 24 * max(len(day_employees), 1))
+    hour_ticks = FOCUS_HOUR_TICKS
+    clock_labels = True
+    single_day = True
+else:
+    chart_frame_pay = pay_df
+    chart_frame_role = role_df
+    chart_employees = employee_order
+    chart_days = day_label_order
+    chart_height = row_height
+    hour_ticks = [0, 12, 24]
+    clock_labels = False
+    single_day = False
+
+if focused_day and not chart_employees:
+    st.info(f"No shifts were clocked on {selected_day}.")
+else:
+    chart_args = dict(
+        employee_order=chart_employees,
+        day_label_order=chart_days,
+        row_height=chart_height,
+        hour_ticks=hour_ticks,
+        clock_labels=clock_labels,
+        single_day=single_day,
+    )
+    pay_title = "Regular and overtime"
+    role_title = "Hours by role"
+    if focused_day:
+        pay_title = f"Regular and overtime — {selected_day}"
+        role_title = f"Hours by role — {selected_day}"
+    st.subheader(pay_title)
+    st.altair_chart(
+        hours_chart(
+            chart_frame_pay,
+            SEGMENT_ORDER,
+            SEGMENT_COLORS,
+            [
+                *shared_tooltip,
+                alt.Tooltip("segment:N", title="Hours"),
+            ],
+            **chart_args,
+        ),
+        use_container_width=True,
+    )
+    st.subheader(role_title)
+    st.altair_chart(
+        hours_chart(
+            chart_frame_role,
+            role_order,
+            role_colors,
+            shared_tooltip,
+            **chart_args,
+        ),
+        use_container_width=True,
+    )
+
+if focused_day:
+    focus_caption = (
+        f"{selected_day} only. The clock is marked every "
+        "two hours. Choose All days to return to the week."
+    )
+else:
+    focus_caption = (
+        "Choose a day above to open that clock with a "
+        "mark every two hours."
+    )
 st.caption(
     f"{len(employee_order):,} hourly employee(s). "
-    "Both charts use the same names, the same days, and "
-    "the same clock, so a bar below is the same shift as "
-    "the bar above it. Names run from the most hours at "
-    "the top to the fewest at the bottom. The number beside "
-    "each name is that employee's total hours for the selected "
-    "roles. The top bar turns red for overtime at the end of "
-    "the shift. The lower bar colors that whole shift by role."
+    "Both charts use the same names and the same clock, "
+    "so a bar below is the same shift as the bar above it. "
+    "Names run from the most hours at the top to the "
+    "fewest at the bottom. The number beside each name is "
+    "that employee's total hours for the selected roles. "
+    "The top bar turns red for overtime at the end of the "
+    "shift. The lower bar colors that whole shift by role. "
+    + focus_caption
 )

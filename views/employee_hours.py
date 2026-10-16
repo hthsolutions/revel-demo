@@ -319,12 +319,14 @@ def hours_chart(
         maxExtent=Y_LABEL_EXTENT,
     )
     ticks = hour_ticks or [0, 12, 24]
-    hour_axis = alt.Axis(
-        values=ticks,
-        labelFlush=True,
-        labelOverlap=False if clock_labels else True,
-        labelExpr=CLOCK_LABEL_EXPR if clock_labels else None,
-    )
+    axis_kwargs = {
+        "values": ticks,
+        "labelFlush": True,
+    }
+    if clock_labels:
+        axis_kwargs["labelExpr"] = CLOCK_LABEL_EXPR
+        axis_kwargs["labelOverlap"] = False
+    hour_axis = alt.Axis(**axis_kwargs)
     encodings = dict(
         y=alt.Y(
             "employee_label:N",

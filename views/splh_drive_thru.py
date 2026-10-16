@@ -1891,7 +1891,7 @@ else:
             alt.Tooltip("cars:Q", title="Cars", format=",.0f"),
             alt.Tooltip(
                 "avg_cars_in_lane:Q",
-                title="Avg cars in lane",
+                title="Avg cars in lane per departure event",
                 format=".1f",
             ),
         ],
@@ -2120,7 +2120,7 @@ period_display = pd.DataFrame(
         "Greet": period_table["greet"].map(format_duration),
         "Service": period_table["service"].map(format_duration),
         "Lane queue": period_table["lane_queue"].map(format_duration),
-        "Avg cars in lane": period_table["avg_cars_in_lane"],
+        "Avg cars in lane Per Departure Event": period_table["avg_cars_in_lane"],
         "% Compliance": period_table["compliance"] * 100,
     }
 )
@@ -2140,7 +2140,7 @@ st.dataframe(
         "Lunch SpLH": st.column_config.NumberColumn(format="$%.2f"),
         "Dinner SpLH": st.column_config.NumberColumn(format="$%.2f"),
         "Cars": st.column_config.NumberColumn(format="%d"),
-        "Avg cars in lane": st.column_config.NumberColumn(format="%.1f"),
+        "Avg cars in lane per departure event": st.column_config.NumberColumn(format="%.1f"),
         "% Compliance": st.column_config.NumberColumn(
             format="%.1f%%",
             help="Share of cars whose lane total was 4:00 or under.",
@@ -2231,7 +2231,7 @@ else:
                 "Lane queue": by_hour["lane_queue"].map(format_duration)
                 if "lane_queue" in by_hour.columns
                 else "—",
-                "Avg cars in lane": by_hour["avg_cars_in_lane"]
+                "Avg cars in lane per departure event": by_hour["avg_cars_in_lane"]
                 if "avg_cars_in_lane" in by_hour.columns
                 else NOT_AVAILABLE,
                 "Sales": by_hour["sales"] if "sales" in by_hour.columns else NOT_AVAILABLE,
@@ -2250,7 +2250,7 @@ else:
             hide_index=True,
             column_config={
                 "Cars": st.column_config.NumberColumn(format="%d"),
-                "Avg cars in lane": st.column_config.NumberColumn(
+                "Avg cars in lane per departure event": st.column_config.NumberColumn(
                     format="%.1f",
                     help=(
                         "Average number of cars still stacked "

@@ -279,7 +279,6 @@ def hours_chart(
     employee_order: list[str],
     day_label_order: list[str],
     row_height: int,
-    title: str,
 ):
     """One week of clock bars. Both charts use this layout."""
 
@@ -336,16 +335,7 @@ def hours_chart(
             ),
             tooltip=tooltip,
         )
-        .properties(
-            width=FACET_WIDTH,
-            height=row_height,
-            title=alt.TitleParams(
-                text=title,
-                anchor="start",
-                fontSize=18,
-                offset=6,
-            ),
-        )
+        .properties(width=FACET_WIDTH, height=row_height)
     )
 
 
@@ -663,31 +653,34 @@ shared_tooltip = [
         format=".2f",
     ),
 ]
-pay_chart = hours_chart(
-    pay_df,
-    SEGMENT_ORDER,
-    SEGMENT_COLORS,
-    [
-        *shared_tooltip,
-        alt.Tooltip("segment:N", title="Hours"),
-    ],
-    employee_order,
-    day_label_order,
-    row_height,
-    "Regular and overtime",
+chart_args = dict(
+    employee_order=employee_order,
+    day_label_order=day_label_order,
+    row_height=row_height,
 )
-role_chart = hours_chart(
-    role_df,
-    role_order,
-    role_colors,
-    shared_tooltip,
-    employee_order,
-    day_label_order,
-    row_height,
-    "Hours by role",
-)
+st.subheader("Regular and overtime")
 st.altair_chart(
-    alt.vconcat(pay_chart, role_chart, spacing=18),
+    hours_chart(
+        pay_df,
+        SEGMENT_ORDER,
+        SEGMENT_COLORS,
+        [
+            *shared_tooltip,
+            alt.Tooltip("segment:N", title="Hours"),
+        ],
+        **chart_args,
+    ),
+    use_container_width=True,
+)
+st.subheader("Hours by role")
+st.altair_chart(
+    hours_chart(
+        role_df,
+        role_order,
+        role_colors,
+        shared_tooltip,
+        **chart_args,
+    ),
     use_container_width=True,
 )
 st.caption(

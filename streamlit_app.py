@@ -30,21 +30,21 @@ navigation = st.navigation(
             title="Hourly Employee Hours",
             icon="🕒",
         ),
-        st.Page(
-            "views/sales_per_labor_hour.py",
-            title="SpLH per Hour",
-            icon="💵",
-        ),
+        # st.Page(
+        #     "views/sales_per_labor_hour.py",
+        #     title="SpLH per Hour",
+        #     icon="💵",
+        # ),
         # st.Page(
         #     "views/drive_thru_times.py",
         #     title="Drive-Thru Times",
         #     icon="🚗",
         # ),
-        # st.Page(
-        #     "views/splh_drive_thru.py",
-        #     title="SpLH & Drive-Thru",
-        #     icon="⏱️",
-        # ),
+        st.Page(
+            "views/splh_drive_thru.py",
+            title="SpLH & Drive-Thru",
+            icon="⏱️",
+        ),
         st.Page(
             "views/combo_mix.py",
             title="Combo Mix",

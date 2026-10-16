@@ -41,6 +41,11 @@ navigation = st.navigation(
             icon="🚗",
         ),
         st.Page(
+            "views/splh_drive_thru.py",
+            title="SpLH & Drive-Thru",
+            icon="⏱️",
+        ),
+        st.Page(
             "views/combo_mix.py",
             title="Combo Mix",
             icon="🍗",

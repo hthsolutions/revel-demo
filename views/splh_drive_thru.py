@@ -44,11 +44,6 @@ GOAL_MINUTES = 4.0
 # Hourly charts and the hourly table use this clock only.
 DISPLAY_START_HOUR = 10
 DISPLAY_END_HOUR = 23
-# Shared by the heatmaps and the hourly bar charts so each
-# clock hour lines up down the page.
-HOUR_BAND = 72
-ROW_BAND = 46
-Y_AXIS_EXTENT = 168
 SPLH_RED = ((103, 0, 13), (239, 59, 44))
 SPLH_GREEN = ((102, 189, 99), (0, 68, 27))
 LANE_RED = ((103, 0, 13), (239, 59, 44))
@@ -958,7 +953,7 @@ def heatmap_legend(top, fill_hex, tick_values, title, number_format, row_count):
             y2="value_end:Q",
             color=alt.Color("fill_color:N", scale=None, legend=None),
         )
-        .properties(width=18, height=max(row_count, 1) * ROW_BAND)
+        .properties(width=18, height=max(row_count, 1) * 46)
     )
 
 
@@ -978,7 +973,7 @@ def render_heatmap(
         "hour_label:N",
         title="Hour",
         sort=hour_order,
-        scale=hour_scale(hour_order),
+        scale=alt.Scale(domain=hour_order),
         axis=alt.Axis(labelAngle=0, labelOverlap=False),
     )
     row_axis_enc = alt.Y(
@@ -986,7 +981,6 @@ def render_heatmap(
         title=None,
         sort=row_order,
         scale=alt.Scale(domain=row_order),
-        axis=fixed_y_axis(),
     )
     base = alt.Chart(frame).transform_filter(
         f"isValid(datum.{value_field})"
@@ -1019,8 +1013,8 @@ def render_heatmap(
     return (
         alt.hconcat(
             alt.layer(rects, labels).properties(
-                width=alt.Step(HOUR_BAND),
-                height=alt.Step(ROW_BAND),
+                width=alt.Step(72),
+                height=alt.Step(46),
             ),
             legend_chart,
         )
@@ -1068,33 +1062,12 @@ def in_display_window(frame: pd.DataFrame) -> pd.DataFrame:
     ].copy()
 
 
-def hour_scale(label_order: list[str]) -> alt.Scale:
-    """One band per clock hour, with the same padding on every chart."""
-
-    return alt.Scale(
-        domain=label_order,
-        paddingInner=0.1,
-        paddingOuter=0.05,
-    )
-
-
-def fixed_y_axis(**kwargs) -> alt.Axis:
-    """Keep the left gutter the same width on every hourly chart."""
-
-    return alt.Axis(
-        minExtent=Y_AXIS_EXTENT,
-        maxExtent=Y_AXIS_EXTENT,
-        labelLimit=Y_AXIS_EXTENT - 18,
-        **kwargs,
-    )
-
-
 def hour_axis(label_order: list[str]) -> alt.X:
     return alt.X(
         "hour_label:N",
         title="Hour",
         sort=label_order,
-        scale=hour_scale(label_order),
+        scale=alt.Scale(domain=label_order),
         axis=alt.Axis(labelAngle=0, labelOverlap=False),
     )
 
@@ -1102,9 +1075,8 @@ def hour_axis(label_order: list[str]) -> alt.X:
 st.title("SpLH & Drive-Thru")
 st.caption(
     "Sales per labor hour and drive-thru lane time for the "
-    "same weeks. The hourly charts share one column per "
-    "hour from 10:00 AM through 11:00 PM. GM shifts are "
-    "excluded."
+    "same weeks. Hourly charts run from 10:00 AM through "
+    "11:00 PM. GM shifts are excluded."
 )
 
 sales_error = None
@@ -1709,8 +1681,8 @@ else:
         splh_caption += "The All row pools every week in the selection. "
     st.caption(
         splh_caption
-        + "Each hour column lines up with the charts below, "
-        + "from 10:00 AM through 11:00 PM."
+        + "Both heatmaps show 10:00 AM through 11:00 PM, "
+        + "with the same weeks."
     )
 
     st.subheader("Drive-thru time by week")
@@ -1826,8 +1798,7 @@ else:
         lane_caption += "The All row pools every week in the selection. "
     st.caption(
         lane_caption
-        + "Each hour column lines up with the charts above "
-        + "and below, from 10:00 AM through 11:00 PM, "
+        + "Both heatmaps show 10:00 AM through 11:00 PM, "
         + "with the same weeks. "
         + f"Showing {window_text}."
     )
@@ -1864,7 +1835,7 @@ if (
             y=alt.Y(
                 "labor_hours:Q",
                 title="Labor Hours",
-                axis=fixed_y_axis(format=",.1f"),
+                axis=alt.Axis(format=",.1f"),
             ),
             tooltip=rate_tooltip,
         )
@@ -1895,13 +1866,13 @@ if (
     st.altair_chart(
         alt.layer(labor_bars, sales_line)
         .resolve_scale(y="independent")
-        .properties(width=alt.Step(HOUR_BAND), height=360),
-        use_container_width=False,
+        .properties(height=360),
+        use_container_width=True,
     )
     st.caption(
         "Bars are labor hours on the left axis. The line is "
-        "sales on the right axis. Each hour lines up with "
-        f"the heatmaps above, pooled across {window_text}."
+        f"sales on the right axis, from 10:00 AM through "
+        f"11:00 PM, pooled across {window_text}."
     )
 
     share_hours = active_hours.copy()
@@ -1944,10 +1915,7 @@ if (
     if pd.isna(percent_max) or percent_max <= 0:
         percent_max = 1.0
     percent_scale = alt.Scale(domain=[0, float(percent_max) * 1.2])
-    percent_axis = fixed_y_axis(
-        format=".1f",
-        labelExpr="datum.value + '%'",
-    )
+    percent_axis = alt.Axis(format=".1f", labelExpr="datum.value + '%'")
     share_bars = (
         alt.Chart(share_long)
         .mark_bar()
@@ -2000,16 +1968,12 @@ if (
     )
     st.subheader("Hourly Sales & Labor Distribution")
     st.altair_chart(
-        alt.layer(share_bars, share_labels).properties(
-            width=alt.Step(HOUR_BAND),
-            height=360,
-        ),
-        use_container_width=False,
+        alt.layer(share_bars, share_labels).properties(height=360),
+        use_container_width=True,
     )
     st.caption(
         "Each hour's share of sales and labor hours across the "
-        "selected periods, in the same hour columns as the "
-        "charts above. The gap between the bars is where "
+        "selected periods. The gap between the bars is where "
         "labor is heavy or light relative to sales."
     )
 

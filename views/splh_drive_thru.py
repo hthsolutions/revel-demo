@@ -25,19 +25,8 @@ from revel_data import (
 )
 
 
-# Same fixed-length buckets as Sales Growth and Labor % of
-# Net Sales. A week is 7 days and a month is 30 days, counted
-# backward from Date end.
+# Weeks only. Each week is 7 days, counted backward from Date end.
 INTERVALS = {
-    "Daily": {
-        "days": 1,
-        "max_duration": 60,
-        "default_duration": 30,
-        "unit": "days",
-        "x_title": "Business date",
-        "duration_label": "Duration (days)",
-        "summary_title": "Selected Day vs Previous Day",
-    },
     "Weekly": {
         "days": 7,
         "max_duration": 52,
@@ -46,15 +35,6 @@ INTERVALS = {
         "x_title": "Week",
         "duration_label": "Duration (weeks)",
         "summary_title": "Selected Week vs Previous Week",
-    },
-    "Monthly": {
-        "days": 30,
-        "max_duration": 12,
-        "default_duration": 6,
-        "unit": "months",
-        "x_title": "30-day period",
-        "duration_label": "Duration (months)",
-        "summary_title": "Selected Month vs Previous Month",
     },
 }
 
@@ -979,12 +959,25 @@ def render_heatmap(
     text_field: str,
     text_format: str | None,
     row_order: list[str],
+    hour_order: list[str],
     tooltip: list,
     legend_chart,
 ):
-    """Period-by-hour heatmap with a color legend."""
+    """Week-by-hour heatmap. Both charts share these axis domains."""
 
-    hour_sort = alt.SortField(field="hour_index")
+    hour_axis_enc = alt.X(
+        "hour_label:N",
+        title="Hour",
+        sort=hour_order,
+        scale=alt.Scale(domain=hour_order),
+        axis=alt.Axis(labelAngle=0, labelOverlap=False),
+    )
+    row_axis_enc = alt.Y(
+        "row_label:N",
+        title=None,
+        sort=row_order,
+        scale=alt.Scale(domain=row_order),
+    )
     base = alt.Chart(frame).transform_filter(
         f"isValid(datum.{value_field})"
     )
@@ -997,17 +990,8 @@ def render_heatmap(
         base
         .mark_rect(stroke="white", strokeWidth=1)
         .encode(
-            x=alt.X(
-                "hour_label:N",
-                title="Hour",
-                sort=hour_sort,
-                axis=alt.Axis(labelAngle=0),
-            ),
-            y=alt.Y(
-                "row_label:N",
-                title=None,
-                sort=row_order,
-            ),
+            x=hour_axis_enc,
+            y=row_axis_enc,
             color=alt.Color("fill_color:N", scale=None, legend=None),
             tooltip=tooltip,
         )
@@ -1016,8 +1000,8 @@ def render_heatmap(
         base
         .mark_text(fontSize=12, fontWeight="bold")
         .encode(
-            x=alt.X("hour_label:N", title="Hour", sort=hour_sort),
-            y=alt.Y("row_label:N", title=None, sort=row_order),
+            x=hour_axis_enc,
+            y=row_axis_enc,
             text=text,
             color=alt.Color("label_color:N", scale=None, legend=None),
         )
@@ -1214,17 +1198,7 @@ else:
             max_date,
         )
 
-selected_interval = st.sidebar.selectbox(
-    "Interval",
-    options=list(INTERVALS),
-    index=list(INTERVALS).index("Weekly"),
-    help=(
-        "Periods are counted backward from Date end. "
-        "A week is 7 days and a month is 30 days. "
-        "This sets the summary, the charts, and both tables."
-    ),
-)
-interval = INTERVALS[selected_interval]
+interval = INTERVALS["Weekly"]
 period_days = interval["days"]
 
 date_end = st.sidebar.date_input(
@@ -1243,26 +1217,15 @@ duration = st.sidebar.number_input(
     max_value=interval["max_duration"],
     value=interval["default_duration"],
     step=1,
-    key=f"splh_drive_thru_duration_{selected_interval}",
+    key="splh_drive_thru_duration_Weekly",
     help=(
-        f"How many {interval['unit']} to include, ending "
-        f"on Date end. "
-        + (
-            "Each month is 30 days. "
-            if period_days == 30
-            else ""
-        )
-        + f"Maximum is {interval['max_duration']}."
+        "How many weeks to include, ending on Date end. "
+        "Each week is 7 days. Maximum is "
+        f"{interval['max_duration']}."
     ),
 )
 duration = int(duration)
-
-if period_days == 1:
-    st.sidebar.caption("Each period is one business day.")
-elif period_days == 7:
-    st.sidebar.caption("Each period is 7 days, ending on Date end.")
-else:
-    st.sidebar.caption("Each period is 30 days, ending on Date end.")
+st.sidebar.caption("Each week is 7 days, ending on Date end.")
 
 st.sidebar.header("Rush windows")
 lunch_start_label = st.sidebar.selectbox(
@@ -1630,53 +1593,100 @@ def period_rows() -> pd.DataFrame:
 
 
 # ---------------------------------------------------------
-# SpLH by period and hour
+# SpLH and drive-thru heatmaps, on the same weeks and hours
 # ---------------------------------------------------------
 
-st.subheader("SpLH by period")
+row_meta = period_rows()
+row_order = row_meta["period_label"].tolist()
+if len(row_order) > 1:
+    row_order = [*row_order, "All"]
 
-if window_hourly.empty or not (
-    (window_hourly["sales"] > 0) | (window_hourly["labor_hours"] > 0)
-).any():
-    st.info("No hourly sales or labor hours fall in the selected range.")
+hour_parts = []
+if not window_hourly.empty:
+    hour_parts.append(
+        window_hourly.loc[
+            (window_hourly["sales"] > 0)
+            | (window_hourly["labor_hours"] > 0),
+            ["hour"],
+        ]
+    )
+if (
+    not window_cars.empty
+    and "hour" in window_cars.columns
+    and "lane_total" in window_cars.columns
+):
+    hour_parts.append(
+        window_cars.dropna(subset=["hour"])[["hour"]]
+    )
+
+if hour_parts:
+    shared_hours = with_hour_fields(
+        pd.concat(hour_parts, ignore_index=True)
+        .dropna(subset=["hour"])
+        .drop_duplicates()
+    )
+    shared_hours = (
+        shared_hours
+        .sort_values(["hour_index", "hour_label"])
+        .drop_duplicates("hour_label")
+        .reset_index(drop=True)
+    )
 else:
-    splh_cells = productivity(
-        window_hourly,
-        ["period_index", "hour"],
+    shared_hours = pd.DataFrame(
+        columns=["hour", "hour_index", "hour_label"]
     )
-    splh_cells = period_rows().merge(
-        splh_cells,
-        on="period_index",
-        how="left",
-    )
-    active_hour_keys = (
-        with_hour_fields(
-            window_hourly.loc[
-                (window_hourly["sales"] > 0)
-                | (window_hourly["labor_hours"] > 0),
-                ["hour"],
-            ].drop_duplicates()
-        )
-    )
-    row_meta = period_rows()
-    splh_grid = row_meta.merge(active_hour_keys, how="cross")
-    splh_grid = splh_grid.merge(
-        splh_cells.drop(
-            columns=["period_label", "period_range", "hour_index", "hour_label"],
-            errors="ignore",
-        ),
-        on=["period_index", "hour"],
-        how="left",
-    )
-    splh_grid["row_label"] = splh_grid["period_label"]
-    row_order = row_meta["period_label"].tolist()
+hour_order = shared_hours["hour_label"].tolist()
 
-    if len(row_order) > 1:
-        pooled = productivity(window_hourly, ["hour"])
-        pooled["row_label"] = "All"
-        pooled["period_range"] = window_text
-        splh_grid = pd.concat([splh_grid, pooled], ignore_index=True)
-        row_order = [*row_order, "All"]
+st.subheader("SpLH by week")
+
+if not hour_order:
+    st.info(
+        "No hourly sales, labor hours, or drive-thru departures "
+        "fall in the selected weeks."
+    )
+else:
+    if window_hourly.empty:
+        splh_cells = pd.DataFrame(
+            columns=["period_index", "hour", "sales_per_labor_hour"]
+        )
+    else:
+        splh_cells = productivity(
+            window_hourly,
+            ["period_index", "hour"],
+        )
+    splh_grid = row_meta.merge(shared_hours, how="cross")
+    if not splh_cells.empty:
+        splh_grid = splh_grid.merge(
+            splh_cells.drop(
+                columns=["hour_index", "hour_label"],
+                errors="ignore",
+            ),
+            on=["period_index", "hour"],
+            how="left",
+        )
+    else:
+        splh_grid["sales_per_labor_hour"] = NOT_AVAILABLE
+    splh_grid["row_label"] = splh_grid["period_label"]
+
+    if len(row_meta) > 1:
+        pooled = (
+            productivity(window_hourly, ["hour"])
+            if not window_hourly.empty
+            else pd.DataFrame(columns=["hour"])
+        )
+        all_grid = shared_hours.copy()
+        all_grid["row_label"] = "All"
+        all_grid["period_range"] = window_text
+        if "sales_per_labor_hour" in pooled.columns:
+            all_grid = all_grid.merge(
+                pooled.drop(
+                    columns=["hour_index", "hour_label"],
+                    errors="ignore",
+                ),
+                on="hour",
+                how="left",
+            )
+        splh_grid = pd.concat([splh_grid, all_grid], ignore_index=True)
 
     scale_top = splh_scale_top(
         splh_grid["sales_per_labor_hour"].max(skipna=True)
@@ -1695,8 +1705,9 @@ else:
         "sales_per_labor_hour",
         "$.0f",
         row_order,
+        hour_order,
         [
-            alt.Tooltip("row_label:N", title="Period"),
+            alt.Tooltip("row_label:N", title="Week"),
             alt.Tooltip("period_range:N", title="Dates"),
             alt.Tooltip("hour_label:N", title="Hour"),
             alt.Tooltip(
@@ -1733,9 +1744,136 @@ else:
         "rate rises. "
     )
     if len(row_order) > 1:
-        splh_caption += "The All row pools every period in the selection. "
-    st.caption(splh_caption)
+        splh_caption += "The All row pools every week in the selection. "
+    st.caption(
+        splh_caption
+        + "Hours and weeks match the drive-thru heatmap below."
+    )
 
+    st.subheader("Drive-thru time by week")
+    if (
+        window_cars.empty
+        or "hour" not in window_cars.columns
+        or "lane_total" not in window_cars.columns
+    ):
+        lane_hours = pd.DataFrame()
+        lane_cells = pd.DataFrame()
+    else:
+        lane_hours = window_cars.dropna(subset=["hour"]).copy()
+        if lane_hours.empty:
+            lane_cells = pd.DataFrame()
+        else:
+            lane_hours["hour"] = lane_hours["hour"].astype(int)
+            lane_cells = rollup_drive_thru_times(
+                lane_hours,
+                ["period_index", "hour"],
+            )
+            lane_cells = with_hour_fields(lane_cells)
+            lane_cells = add_duration_labels(lane_cells)
+            lane_cells["minutes"] = lane_cells["lane_total"] / 60.0
+
+    lane_grid = row_meta.merge(shared_hours, how="cross")
+    if lane_cells.empty:
+        lane_grid["minutes"] = NOT_AVAILABLE
+        lane_grid["lane_total_label"] = pd.NA
+    else:
+        lane_grid = lane_grid.merge(
+            lane_cells.drop(
+                columns=["hour_index", "hour_label"],
+                errors="ignore",
+            ),
+            on=["period_index", "hour"],
+            how="left",
+        )
+    lane_grid["row_label"] = lane_grid["period_label"]
+
+    if len(row_meta) > 1:
+        all_grid = shared_hours.copy()
+        all_grid["row_label"] = "All"
+        all_grid["period_range"] = window_text
+        if not lane_hours.empty:
+            pooled_lane = rollup_drive_thru_times(lane_hours, ["hour"])
+            pooled_lane = with_hour_fields(pooled_lane)
+            pooled_lane = add_duration_labels(pooled_lane)
+            pooled_lane["minutes"] = pooled_lane["lane_total"] / 60.0
+            all_grid = all_grid.merge(
+                pooled_lane.drop(
+                    columns=["hour_index", "hour_label"],
+                    errors="ignore",
+                ),
+                on="hour",
+                how="left",
+            )
+        else:
+            all_grid["minutes"] = NOT_AVAILABLE
+            all_grid["lane_total_label"] = pd.NA
+        lane_grid = pd.concat([lane_grid, all_grid], ignore_index=True)
+
+    lane_scale = lane_scale_top(lane_grid["minutes"].max(skipna=True))
+    lane_grid = paint_heatmap(
+        lane_grid,
+        "minutes",
+        lane_color_hex,
+        lane_label_color,
+        lane_scale,
+    )
+    lane_ticks = [0, GOAL_MINUTES]
+    if lane_scale > GOAL_MINUTES + 0.05:
+        lane_ticks.append(float(lane_scale))
+    lane_heatmap = render_heatmap(
+        lane_grid,
+        "minutes",
+        "lane_total_label",
+        None,
+        row_order,
+        hour_order,
+        [
+            alt.Tooltip("row_label:N", title="Week"),
+            alt.Tooltip("period_range:N", title="Dates"),
+            alt.Tooltip("hour_label:N", title="Hour"),
+            alt.Tooltip("lane_total_label:N", title="Lane total"),
+            alt.Tooltip("menu_board_label:N", title="Menu board"),
+            alt.Tooltip("greet_label:N", title="Greet"),
+            alt.Tooltip("service_label:N", title="Service"),
+            alt.Tooltip("lane_queue_label:N", title="Lane queue"),
+            alt.Tooltip("cars:Q", title="Cars", format=",.0f"),
+            alt.Tooltip(
+                "avg_cars_in_lane:Q",
+                title="Avg cars in lane",
+                format=".1f",
+            ),
+        ],
+        heatmap_legend(
+            lane_scale,
+            lane_color_hex,
+            lane_ticks,
+            "Minutes",
+            ".1f",
+            len(row_order),
+        ),
+    )
+    st.altair_chart(lane_heatmap, use_container_width=False)
+    lane_caption = (
+        "Each cell is the average lane time for cars that "
+        "left during that hour. 4:00 and under is green, "
+        "and darker green is a faster lane. Above 4:00 is "
+        "red, and darker red is a slower lane. "
+    )
+    if len(row_order) > 1:
+        lane_caption += "The All row pools every week in the selection. "
+    st.caption(
+        lane_caption
+        + "Hours and weeks match the SpLH heatmap above. "
+        + f"Showing {window_text}."
+    )
+
+if (
+    not window_hourly.empty
+    and (
+        (window_hourly["sales"] > 0)
+        | (window_hourly["labor_hours"] > 0)
+    ).any()
+):
     active_hours = productivity(window_hourly, ["hour"])
     active_hours = active_hours.loc[
         (active_hours["sales"] > 0) | (active_hours["labor_hours"] > 0)
@@ -1902,105 +2040,6 @@ else:
         "labor is heavy or light relative to sales."
     )
 
-
-# ---------------------------------------------------------
-# Drive-thru time by period and hour
-# ---------------------------------------------------------
-
-st.subheader("Drive-thru time by period")
-
-if window_cars.empty or "lane_total" not in window_cars.columns:
-    st.info("No drive-thru departures fall in the selected range.")
-else:
-    lane_hours = window_cars.dropna(subset=["hour"]).copy()
-    lane_hours["hour"] = lane_hours["hour"].astype(int)
-    lane_cells = rollup_drive_thru_times(
-        lane_hours,
-        ["period_index", "hour"],
-    )
-    if lane_cells.empty:
-        st.info("No drive-thru departures fall in the selected range.")
-    else:
-        lane_cells = with_hour_fields(lane_cells)
-        lane_cells = add_duration_labels(lane_cells)
-        lane_cells["minutes"] = lane_cells["lane_total"] / 60.0
-        row_meta = period_rows()
-        active_lane_hours = lane_cells[
-            ["hour", "hour_index", "hour_label"]
-        ].drop_duplicates()
-        lane_grid = row_meta.merge(active_lane_hours, how="cross")
-        lane_grid = lane_grid.merge(
-            lane_cells.drop(columns=["hour_index", "hour_label"]),
-            on=["period_index", "hour"],
-            how="left",
-        )
-        lane_grid["row_label"] = lane_grid["period_label"]
-        row_order = row_meta["period_label"].tolist()
-
-        if len(row_order) > 1:
-            pooled = rollup_drive_thru_times(lane_hours, ["hour"])
-            pooled = with_hour_fields(pooled)
-            pooled = add_duration_labels(pooled)
-            pooled["minutes"] = pooled["lane_total"] / 60.0
-            pooled["row_label"] = "All"
-            pooled["period_range"] = window_text
-            lane_grid = pd.concat([lane_grid, pooled], ignore_index=True)
-            row_order = [*row_order, "All"]
-
-        scale_top = lane_scale_top(lane_grid["minutes"].max(skipna=True))
-        lane_grid = paint_heatmap(
-            lane_grid,
-            "minutes",
-            lane_color_hex,
-            lane_label_color,
-            scale_top,
-        )
-        legend_ticks = [0, GOAL_MINUTES]
-        if scale_top > GOAL_MINUTES + 0.05:
-            legend_ticks.append(float(scale_top))
-        lane_heatmap = render_heatmap(
-            lane_grid,
-            "minutes",
-            "lane_total_label",
-            None,
-            row_order,
-            [
-                alt.Tooltip("row_label:N", title="Period"),
-                alt.Tooltip("period_range:N", title="Dates"),
-                alt.Tooltip("hour_label:N", title="Hour"),
-                alt.Tooltip("lane_total_label:N", title="Lane total"),
-                alt.Tooltip("menu_board_label:N", title="Menu board"),
-                alt.Tooltip("greet_label:N", title="Greet"),
-                alt.Tooltip("service_label:N", title="Service"),
-                alt.Tooltip("lane_queue_label:N", title="Lane queue"),
-                alt.Tooltip("cars:Q", title="Cars", format=",.0f"),
-                alt.Tooltip(
-                    "avg_cars_in_lane:Q",
-                    title="Avg cars in lane",
-                    format=".1f",
-                ),
-            ],
-            heatmap_legend(
-                scale_top,
-                lane_color_hex,
-                legend_ticks,
-                "Minutes",
-                ".1f",
-                len(row_order),
-            ),
-        )
-        st.altair_chart(lane_heatmap, use_container_width=False)
-        lane_caption = (
-            "Each cell is the average lane time for cars that "
-            "left during that hour. 4:00 and under is green, "
-            "and darker green is a faster lane. Above 4:00 is "
-            "red, and darker red is a slower lane. "
-        )
-        if len(row_order) > 1:
-            lane_caption += (
-                "The All row pools every period in the selection. "
-            )
-        st.caption(lane_caption + f"Showing {window_text}.")
 
 
 # ---------------------------------------------------------

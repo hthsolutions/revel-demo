@@ -303,8 +303,15 @@ def hours_chart(
                 title=None,
                 scale=alt.Scale(domain=[0, DAY_HOUR_SPAN]),
                 axis=alt.Axis(
-                    values=[0, 12, 24],
+                    values=[0, 6, 12, 18, 24],
                     labelFlush=True,
+                    labelOverlap=False,
+                    labelExpr=(
+                        "datum.value == 0 || datum.value == 24 "
+                        "? '12a' : datum.value == 12 ? '12p' "
+                        ": datum.value < 12 ? datum.value + 'a' "
+                        ": (datum.value - 12) + 'p'"
+                    ),
                 ),
             ),
             x2="end_hour:Q",

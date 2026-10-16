@@ -22,6 +22,32 @@ STORE_TIMEZONE = ZoneInfo("America/Chicago")
 
 SEGMENT_ORDER = ["Regular", "Overtime"]
 SEGMENT_COLORS = ["#2ca02c", "#d62728"]
+# Same facet size and name-column width on both charts, so
+# a shift on the overtime chart sits on the same clock below.
+FACET_WIDTH = 128
+Y_LABEL_EXTENT = 280
+ROLE_PALETTE = [
+    "#1f77b4",
+    "#ff7f0e",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#17becf",
+    "#bcbd22",
+    "#7f7f7f",
+    "#aec7e8",
+    "#ffbb78",
+    "#c5b0d5",
+    "#c49c94",
+    "#f7b6d2",
+    "#9edae5",
+    "#dbdb8d",
+    "#c7c7c7",
+    "#393b79",
+    "#637939",
+    "#8c6d31",
+    "#843c39",
+]
 
 
 def format_week(week_start) -> str:
@@ -142,12 +168,193 @@ def paint_shift(clock_in, clock_out, regular_hours, ot_hours):
     return painted
 
 
+def paint_role_span(
+    clock_in,
+    clock_out,
+    regular_hours,
+    ot_hours,
+    role: str,
+):
+    """Same clock span as the overtime bar, in one role color."""
+
+    painted = paint_shift(
+        clock_in,
+        clock_out,
+        regular_hours,
+        ot_hours,
+    )
+    if not painted:
+        return []
+    return [(painted[0][0], painted[-1][1], role)]
+
+
+def build_segment_rows(week_df: pd.DataFrame, day_by_date, color_by: str):
+    """One row per colored piece of a shift on a calendar day."""
+
+    rows = []
+    for shift in week_df.itertuples(index=False):
+        if color_by == "pay":
+            painted = paint_shift(
+                shift.clock_in,
+                shift.clock_out,
+                shift.regular_hours,
+                shift.ot_hours,
+            )
+        else:
+            painted = paint_role_span(
+                shift.clock_in,
+                shift.clock_out,
+                shift.regular_hours,
+                shift.ot_hours,
+                shift.role,
+            )
+        for start, end, segment in painted:
+            for day, start_hour, end_hour in split_on_midnights(
+                start,
+                end,
+            ):
+                day_label = day_by_date.get(
+                    pd.Timestamp(day).normalize()
+                )
+                if day_label is None or end_hour <= start_hour:
+                    continue
+                rows.append(
+                    {
+                        "employee": shift.employee,
+                        "role": shift.role,
+                        "day_label": day_label,
+                        "start_hour": start_hour,
+                        "end_hour": end_hour,
+                        "segment": segment,
+                        "clock_in_label": format_clock(shift.clock_in),
+                        "clock_out_label": format_clock(shift.clock_out),
+                        "regular_hours": float(
+                            shift.regular_hours or 0
+                        ),
+                        "ot_hours": float(shift.ot_hours or 0),
+                        "shift_hours": float(shift.shift_hours or 0),
+                        "cumulative_hours": float(
+                            shift.cumulative_hours or 0
+                        ),
+                    }
+                )
+    return rows
+
+
+def add_missing_days(
+    frame: pd.DataFrame,
+    employee_order: list[str],
+    first_employee: str,
+    day_label_order: list[str],
+    filler_segment: str,
+) -> pd.DataFrame:
+    """Keep every weekday column, even when that day has no shifts."""
+
+    missing_days = [
+        label
+        for label in day_label_order
+        if label not in set(frame["day_label"])
+    ]
+    if not missing_days:
+        return frame
+    placeholders = pd.DataFrame(
+        {
+            "employee": first_employee,
+            "employee_label": employee_order[0],
+            "day_label": missing_days,
+            "start_hour": 0.0,
+            "end_hour": 0.0,
+            "segment": filler_segment,
+            "bar_opacity": 0.0,
+        }
+    )
+    return pd.concat([frame, placeholders], ignore_index=True)
+
+
+def hours_chart(
+    frame: pd.DataFrame,
+    color_domain: list[str],
+    color_range: list[str],
+    tooltip: list,
+    employee_order: list[str],
+    day_label_order: list[str],
+    row_height: int,
+    title: str,
+):
+    """One week of clock bars. Both charts use this layout."""
+
+    name_axis = alt.Axis(
+        labelLimit=Y_LABEL_EXTENT,
+        minExtent=Y_LABEL_EXTENT,
+        maxExtent=Y_LABEL_EXTENT,
+    )
+    return (
+        alt.Chart(frame)
+        .mark_bar()
+        .encode(
+            y=alt.Y(
+                "employee_label:N",
+                title=None,
+                sort=employee_order,
+                scale=alt.Scale(domain=employee_order),
+                axis=name_axis,
+            ),
+            x=alt.X(
+                "start_hour:Q",
+                title=None,
+                scale=alt.Scale(domain=[0, DAY_HOUR_SPAN]),
+                axis=alt.Axis(
+                    values=[0, 12, 24],
+                    labelFlush=True,
+                ),
+            ),
+            x2="end_hour:Q",
+            opacity=alt.Opacity(
+                "bar_opacity:Q",
+                scale=alt.Scale(domain=[0, 1], range=[0, 1]),
+                legend=None,
+            ),
+            color=alt.Color(
+                "segment:N",
+                title=None,
+                sort=color_domain,
+                scale=alt.Scale(
+                    domain=color_domain,
+                    range=color_range,
+                ),
+                legend=alt.Legend(orient="top"),
+            ),
+            column=alt.Column(
+                "day_label:N",
+                title=None,
+                sort=day_label_order,
+                header=alt.Header(
+                    labelOrient="top",
+                    labelAlign="center",
+                ),
+                spacing=8,
+            ),
+            tooltip=tooltip,
+        )
+        .properties(
+            width=FACET_WIDTH,
+            height=row_height,
+            title=alt.TitleParams(
+                text=title,
+                anchor="start",
+                fontSize=18,
+                offset=6,
+            ),
+        )
+    )
+
+
 st.title("Hourly Employee Hours")
 st.caption(
     "One week at a time. Each day is a clock from midnight "
-    "to midnight. Green is the shift on that clock, and it "
-    "turns red for the overtime at the end of the shift. "
-    "GM shifts are excluded."
+    "to midnight. The top chart turns green for the shift "
+    "and red for overtime at the end of it. The chart below "
+    "colors those same shifts by role. GM shifts are excluded."
 )
 
 try:
@@ -204,9 +411,11 @@ shift_df.loc[shift_df["employee"] == "", "employee"] = "Unknown"
 shift_df = shift_df.merge(clock_df, on="record_key", how="left")
 shift_df["clock_in"] = shift_df["clock_in"].map(parse_store_clock)
 shift_df["clock_out"] = shift_df["clock_out"].map(parse_store_clock)
-shift_df = shift_df[
-    shift_df["role"].astype(str).str.strip().str.upper() != "GM"
-].copy()
+shift_df["role"] = (
+    shift_df["role"].fillna("Unassigned").astype(str).str.strip()
+)
+shift_df.loc[shift_df["role"] == "", "role"] = "Unassigned"
+shift_df = shift_df[shift_df["role"].str.upper() != "GM"].copy()
 
 if shift_df.empty:
     st.warning("No hourly shifts remain after excluding GM.")
@@ -261,6 +470,43 @@ if week_df.empty:
     st.info("No hourly shifts fall in that week.")
     st.stop()
 
+available_roles = sorted(
+    week_df["role"].unique(),
+    key=str.lower,
+)
+role_key = "employee_hours_roles"
+if role_key not in st.session_state:
+    st.session_state[role_key] = available_roles
+else:
+    previous_roles = list(st.session_state[role_key])
+    kept_roles = [
+        role for role in previous_roles if role in available_roles
+    ]
+    if previous_roles and not kept_roles:
+        kept_roles = available_roles
+    st.session_state[role_key] = kept_roles
+
+selected_roles = st.sidebar.multiselect(
+    "Roles",
+    options=available_roles,
+    key=role_key,
+    placeholder="Select roles",
+    help=(
+        "Both charts show shifts for the selected roles. "
+        "All roles in the week are selected until you change this."
+    ),
+)
+if not selected_roles:
+    st.info("Select at least one role to see hours.")
+    st.stop()
+
+week_df = week_df[week_df["role"].isin(selected_roles)].copy()
+if week_df.empty:
+    st.info(
+        "No hourly shifts for the selected roles fall in that week."
+    )
+    st.stop()
+
 week_df["shift_hours"] = (
     week_df["regular_hours"].fillna(0)
     + week_df["ot_hours"].fillna(0)
@@ -298,39 +544,8 @@ day_by_date = {
     for row in days_df.itertuples(index=False)
 }
 
-segment_rows = []
-for shift in week_df.itertuples(index=False):
-    painted = paint_shift(
-        shift.clock_in,
-        shift.clock_out,
-        shift.regular_hours,
-        shift.ot_hours,
-    )
-    for start, end, segment in painted:
-        for day, start_hour, end_hour in split_on_midnights(
-            start,
-            end,
-        ):
-            day_label = day_by_date.get(pd.Timestamp(day).normalize())
-            if day_label is None or end_hour <= start_hour:
-                continue
-            segment_rows.append(
-                {
-                    "employee": shift.employee,
-                    "day_label": day_label,
-                    "start_hour": start_hour,
-                    "end_hour": end_hour,
-                    "segment": segment,
-                    "clock_in_label": format_clock(shift.clock_in),
-                    "clock_out_label": format_clock(shift.clock_out),
-                    "regular_hours": float(shift.regular_hours or 0),
-                    "ot_hours": float(shift.ot_hours or 0),
-                    "shift_hours": float(shift.shift_hours or 0),
-                    "cumulative_hours": float(
-                        shift.cumulative_hours or 0
-                    ),
-                }
-            )
+pay_rows = build_segment_rows(week_df, day_by_date, "pay")
+role_rows = build_segment_rows(week_df, day_by_date, "role")
 
 st.subheader(format_week(selected_week))
 
@@ -356,15 +571,17 @@ kpi_columns[4].metric(
     f"{employees_with_ot:,.0f}",
 )
 
-if not segment_rows:
+if not pay_rows or not role_rows:
     st.info(
         "That week has shifts, but none have a clock-in "
         "and clock-out that can be drawn."
     )
     st.stop()
 
-segments_df = pd.DataFrame(segment_rows)
-segments_df["bar_opacity"] = 1.0
+pay_df = pd.DataFrame(pay_rows)
+role_df = pd.DataFrame(role_rows)
+pay_df["bar_opacity"] = 1.0
+role_df["bar_opacity"] = 1.0
 
 # Most hours at the top, fewest at the bottom. The
 # number beside each name is that week's paid hours.
@@ -373,7 +590,7 @@ week_totals = (
     .groupby("employee", as_index=False)["shift_hours"]
     .sum()
 )
-shown_employees = set(segments_df["employee"])
+shown_employees = set(pay_df["employee"])
 week_totals = week_totals[
     week_totals["employee"].isin(shown_employees)
 ].copy()
@@ -392,116 +609,94 @@ label_by_employee = dict(
         week_totals["employee_label"],
     )
 )
-segments_df["employee_label"] = segments_df["employee"].map(
-    label_by_employee
-)
+pay_df["employee_label"] = pay_df["employee"].map(label_by_employee)
+role_df["employee_label"] = role_df["employee"].map(label_by_employee)
 employee_order = week_totals["employee_label"].tolist()
 day_label_order = days_df["day_label"].tolist()
-missing_days = [
-    label
-    for label in day_label_order
-    if label not in set(segments_df["day_label"])
+first_employee = week_totals["employee"].iloc[0]
+role_order = sorted(role_df["segment"].dropna().unique(), key=str.lower)
+role_colors = [
+    ROLE_PALETTE[index % len(ROLE_PALETTE)]
+    for index in range(len(role_order))
 ]
-if missing_days:
-    placeholders = pd.DataFrame(
-        {
-            "employee": week_totals["employee"].iloc[0],
-            "employee_label": employee_order[0],
-            "day_label": missing_days,
-            "start_hour": 0.0,
-            "end_hour": 0.0,
-            "segment": "Regular",
-            "bar_opacity": 0.0,
-        }
-    )
-    segments_df = pd.concat(
-        [segments_df, placeholders],
-        ignore_index=True,
-    )
 
-row_height = max(360, 24 * len(employee_order))
-hour_axis = alt.Axis(values=[0, 12, 24], labelFlush=True)
-hour_scale = alt.Scale(domain=[0, DAY_HOUR_SPAN])
-
-shifts = (
-    alt.Chart(segments_df)
-    .mark_bar()
-    .encode(
-        y=alt.Y(
-            "employee_label:N",
-            title=None,
-            sort=employee_order,
-            axis=alt.Axis(labelLimit=280),
-        ),
-        x=alt.X(
-            "start_hour:Q",
-            title=None,
-            scale=hour_scale,
-            axis=hour_axis,
-        ),
-        x2="end_hour:Q",
-        opacity=alt.Opacity(
-            "bar_opacity:Q",
-            scale=alt.Scale(domain=[0, 1], range=[0, 1]),
-            legend=None,
-        ),
-        color=alt.Color(
-            "segment:N",
-            title=None,
-            sort=SEGMENT_ORDER,
-            scale=alt.Scale(
-                domain=SEGMENT_ORDER,
-                range=SEGMENT_COLORS,
-            ),
-            legend=alt.Legend(orient="top"),
-        ),
-        column=alt.Column(
-            "day_label:N",
-            title=None,
-            sort=day_label_order,
-            header=alt.Header(
-                labelOrient="top",
-                labelAlign="center",
-            ),
-            spacing=8,
-        ),
-        tooltip=[
-            alt.Tooltip("employee:N", title="Employee"),
-            alt.Tooltip("day_label:N", title="Day"),
-            alt.Tooltip("clock_in_label:N", title="Clock In"),
-            alt.Tooltip("clock_out_label:N", title="Clock Out"),
-            alt.Tooltip(
-                "regular_hours:Q",
-                title="Regular Hours",
-                format=".2f",
-            ),
-            alt.Tooltip(
-                "ot_hours:Q",
-                title="Overtime Hours",
-                format=".2f",
-            ),
-            alt.Tooltip(
-                "shift_hours:Q",
-                title="Shift Hours",
-                format=".2f",
-            ),
-            alt.Tooltip(
-                "cumulative_hours:Q",
-                title="Cumulative Hours",
-                format=".2f",
-            ),
-        ],
-    )
+pay_df = add_missing_days(
+    pay_df,
+    employee_order,
+    first_employee,
+    day_label_order,
+    "Regular",
+)
+role_df = add_missing_days(
+    role_df,
+    employee_order,
+    first_employee,
+    day_label_order,
+    role_order[0],
 )
 
-hours_chart = shifts.properties(width=128, height=row_height)
-
-st.altair_chart(hours_chart, use_container_width=True)
+row_height = max(360, 24 * len(employee_order))
+shared_tooltip = [
+    alt.Tooltip("employee:N", title="Employee"),
+    alt.Tooltip("role:N", title="Role"),
+    alt.Tooltip("day_label:N", title="Day"),
+    alt.Tooltip("clock_in_label:N", title="Clock In"),
+    alt.Tooltip("clock_out_label:N", title="Clock Out"),
+    alt.Tooltip(
+        "regular_hours:Q",
+        title="Regular Hours",
+        format=".2f",
+    ),
+    alt.Tooltip(
+        "ot_hours:Q",
+        title="Overtime Hours",
+        format=".2f",
+    ),
+    alt.Tooltip(
+        "shift_hours:Q",
+        title="Shift Hours",
+        format=".2f",
+    ),
+    alt.Tooltip(
+        "cumulative_hours:Q",
+        title="Cumulative Hours",
+        format=".2f",
+    ),
+]
+pay_chart = hours_chart(
+    pay_df,
+    SEGMENT_ORDER,
+    SEGMENT_COLORS,
+    [
+        *shared_tooltip,
+        alt.Tooltip("segment:N", title="Hours"),
+    ],
+    employee_order,
+    day_label_order,
+    row_height,
+    "Regular and overtime",
+)
+role_chart = hours_chart(
+    role_df,
+    role_order,
+    role_colors,
+    shared_tooltip,
+    employee_order,
+    day_label_order,
+    row_height,
+    "Hours by role",
+)
+st.altair_chart(
+    alt.vconcat(pay_chart, role_chart, spacing=18),
+    use_container_width=True,
+)
 st.caption(
     f"{len(employee_order):,} hourly employee(s). "
-    "Names run from the most hours at the top to the "
-    "fewest at the bottom. The number beside each name "
-    "is that employee's total hours for the week. "
-    "Each bar sits on the hours they were clocked in "
-    "and turns red for overtime at the end of the shift."
+    "Both charts use the same names, the same days, and "
+    "the same clock, so a bar below is the same shift as "
+    "the bar above it. Names run from the most hours at "
+    "the top to the fewest at the bottom. The number beside "
+    "each name is that employee's total hours for the selected "
+    "roles. The top bar turns red for overtime at the end of "
+    "the shift. The lower bar colors that whole shift by role."
 )

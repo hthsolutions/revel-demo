@@ -160,27 +160,31 @@ def _label_color(fill, luminance_cutoff: float) -> str:
 
 
 def splh_scale_top(rate_max: float) -> float:
-    """Keep the green end of the scale above the $70 break."""
+    """Keep the green end of the scale above the entered break."""
 
+    break_at = max(float(GREEN_SPLH), 0.0)
     if pd.isna(rate_max) or rate_max <= 0:
-        return GREEN_SPLH + 0.01
-    return max(float(rate_max), GREEN_SPLH + 0.01)
+        return break_at + 0.01
+    return max(float(rate_max), break_at + 0.01)
 
 
 def splh_fill(value, top: float):
-    """Red shades under $70, and green shades from $70 upward."""
+    """Red below the entered SpLH, and green from that amount up."""
 
     if value is None or pd.isna(value):
         return None
     amount = float(value)
-    if amount >= GREEN_SPLH:
-        span = max(float(top) - GREEN_SPLH, 0.01)
+    break_at = max(float(GREEN_SPLH), 0.0)
+    if amount >= break_at:
+        span = max(float(top) - break_at, 0.01)
         return _mix_color(
             SPLH_GREEN[0],
             SPLH_GREEN[1],
-            (amount - GREEN_SPLH) / span,
+            (amount - break_at) / span,
         )
-    return _mix_color(SPLH_RED[0], SPLH_RED[1], amount / GREEN_SPLH)
+    if break_at <= 0:
+        return _mix_color(SPLH_RED[0], SPLH_RED[1], 1.0)
+    return _mix_color(SPLH_RED[0], SPLH_RED[1], amount / break_at)
 
 
 def splh_color_hex(value, top: float):
@@ -195,30 +199,37 @@ def splh_label_color(value, top: float) -> str:
 
 
 def lane_scale_top(minutes_max: float) -> float:
-    """Keep the 4-minute break on the scale."""
+    """Keep the entered lane goal on the scale."""
 
+    break_at = max(float(GOAL_MINUTES), 0.0)
     if pd.isna(minutes_max) or minutes_max <= 0:
-        return GOAL_MINUTES
-    return max(float(minutes_max), GOAL_MINUTES)
+        return break_at
+    return max(float(minutes_max), break_at)
 
 
 def lane_fill(minutes, top: float):
-    """Green at 4 minutes or under, red when the lane runs longer."""
+    """Green at the entered goal or under, red when the lane is slower."""
 
     if minutes is None or pd.isna(minutes):
         return None
     amount = float(minutes)
-    if amount <= GOAL_MINUTES:
+    break_at = max(float(GOAL_MINUTES), 0.0)
+    if break_at <= 0:
+        if amount <= 0:
+            return LANE_GREEN[0]
+        span = max(float(top), 0.01)
+        return _mix_color(LANE_RED[1], LANE_RED[0], amount / span)
+    if amount <= break_at:
         return _mix_color(
             LANE_GREEN[1],
             LANE_GREEN[0],
-            amount / GOAL_MINUTES,
+            amount / break_at,
         )
-    span = max(float(top) - GOAL_MINUTES, 0.01)
+    span = max(float(top) - break_at, 0.01)
     return _mix_color(
         LANE_RED[1],
         LANE_RED[0],
-        (amount - GOAL_MINUTES) / span,
+        (amount - break_at) / span,
     )
 
 
@@ -806,7 +817,7 @@ def period_rates(frame: pd.DataFrame) -> dict:
 
 
 def compliance_rate(frame: pd.DataFrame):
-    """Share of departures at or under the 4-minute lane goal."""
+    """Share of departures at or under the entered lane goal."""
 
     if frame.empty or "lane_total" not in frame.columns:
         return NOT_AVAILABLE
@@ -1282,6 +1293,46 @@ selected_weekday = st.sidebar.selectbox(
     ),
 )
 
+st.sidebar.header("Color breaks")
+GREEN_SPLH = float(
+    st.sidebar.number_input(
+        "SpLH green ($)",
+        min_value=0.0,
+        value=70.0,
+        step=1.0,
+        key="splh_drive_thru_green_splh",
+        help=(
+            "Hourly SpLH at or above this amount is green "
+            "on the heatmap. Below it is red."
+        ),
+    )
+)
+GOAL_MINUTES = float(
+    st.sidebar.number_input(
+        "Lane goal (minutes)",
+        min_value=0.0,
+        value=4.0,
+        step=0.25,
+        format="%.2f",
+        key="splh_drive_thru_lane_goal",
+        help=(
+            "Lane time at or under this is green, and it "
+            "is the compliance cutoff. 4.00 is 4:00. "
+            "Each step is 15 seconds."
+        ),
+    )
+)
+splh_break_label = (
+    f"${GREEN_SPLH:,.0f}"
+    if float(GREEN_SPLH).is_integer()
+    else f"${GREEN_SPLH:,.2f}"
+)
+lane_goal_label = format_duration(GOAL_MINUTES * 60)
+st.sidebar.caption(
+    f"Green SpLH starts at {splh_break_label}. "
+    f"Green lane time is {lane_goal_label} or under."
+)
+
 st.sidebar.header("Rush windows")
 lunch_start_label = st.sidebar.selectbox(
     "Lunch rush start",
@@ -1484,7 +1535,7 @@ lane_columns[2].metric(
     delta=compliance_delta,
     help=(
         "Share of cars in this period whose lane total "
-        "was 4:00 or under."
+        f"was {lane_goal_label} or under."
     ),
 )
 
@@ -1673,9 +1724,9 @@ else:
     st.altair_chart(splh_heatmap, use_container_width=False)
     splh_caption = (
         "Each cell is sales during that hour divided by labor "
-        "hours clocked during that hour. Rates under $70 are "
-        "red. Rates of $70 and above are green, darker as the "
-        "rate rises. "
+        "hours clocked during that hour. Rates under "
+        f"{splh_break_label} are red. Rates of {splh_break_label} "
+        "and above are green, darker as the rate rises. "
     )
     if len(row_order) > 1:
         splh_caption += "The All row pools every week in the selection. "
@@ -1790,9 +1841,10 @@ else:
     st.altair_chart(lane_heatmap, use_container_width=False)
     lane_caption = (
         "Each cell is the average lane time for cars that "
-        "left during that hour. 4:00 and under is green, "
-        "and darker green is a faster lane. Above 4:00 is "
-        "red, and darker red is a slower lane. "
+        f"left during that hour. {lane_goal_label} and under "
+        "is green, and darker green is a faster lane. Above "
+        f"{lane_goal_label} is red, and darker red is a "
+        "slower lane. "
     )
     if len(row_order) > 1:
         lane_caption += "The All row pools every week in the selection. "
@@ -2026,7 +2078,10 @@ st.dataframe(
         "Avg cars in lane per departure event": st.column_config.NumberColumn(format="%.2f"),
         "% Compliance": st.column_config.NumberColumn(
             format="%.1f%%",
-            help="Share of cars whose lane total was 4:00 or under.",
+            help=(
+                "Share of cars whose lane total was "
+                f"{lane_goal_label} or under."
+            ),
         ),
     },
 )

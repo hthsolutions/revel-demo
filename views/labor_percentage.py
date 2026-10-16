@@ -1847,6 +1847,21 @@ else:
             "role",
             "ot_labor",
         )
+        # Stack each period by that period's overtime pay.
+        # A role's total across the selection can rank it
+        # differently from one week, such as 9/14–9/20.
+        ot_role_df = ot_role_df.sort_values(
+            ["period_index", "ot_labor", "role"],
+            ascending=[True, False, True],
+        )
+        ot_role_df["ot_labor_top"] = (
+            ot_role_df
+            .groupby("period_index", sort=False)["ot_labor"]
+            .cumsum()
+        )
+        ot_role_df["ot_labor_base"] = (
+            ot_role_df["ot_labor_top"] - ot_role_df["ot_labor"]
+        )
     else:
         ot_role_order = []
 
@@ -1954,21 +1969,18 @@ else:
             .encode(
                 x=ot_period_axis,
                 y=alt.Y(
-                    "ot_labor:Q",
+                    "ot_labor_base:Q",
                     title="Total OT Labor $",
-                    stack="zero",
+                    stack=None,
                     axis=alt.Axis(format="$,.0f"),
                     scale=ot_labor_scale,
                 ),
+                y2=alt.Y2("ot_labor_top:Q"),
                 color=alt.Color(
                     "role:N",
                     title="Role",
                     scale=alt.Scale(scheme="tableau10"),
                     sort=ot_role_order,
-                ),
-                order=alt.Order(
-                    "stack_rank:Q",
-                    sort="ascending",
                 ),
                 opacity=alt.condition(
                     alt.datum.is_complete,
@@ -2074,9 +2086,10 @@ else:
     st.caption(
         "Each bar uses the same periods as the charts above. "
         "Bars are overtime pay on the left axis, split by "
-        "role. The largest overtime role sits at the bottom "
-        "of each bar. Hover a segment for that role's overtime "
-        "hours and overtime pay. The right axis is overtime pay "
+        "role. Within each bar, that period's largest "
+        "overtime amount sits at the bottom. Hover a segment "
+        "for that role's overtime hours and overtime pay. "
+        "The right axis is overtime pay "
         "as a percent of total labor. Total OT hours on the "
         "line exclude the GM role."
     )

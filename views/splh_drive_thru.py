@@ -40,6 +40,9 @@ INTERVALS = {
 
 GREEN_SPLH = 70.0
 GOAL_MINUTES = 4.0
+# Hourly charts and the hourly table use this clock only.
+DISPLAY_START_HOUR = 10
+DISPLAY_END_HOUR = 23
 SPLH_RED = ((103, 0, 13), (239, 59, 44))
 SPLH_GREEN = ((102, 189, 99), (0, 68, 27))
 LANE_RED = ((103, 0, 13), (239, 59, 44))
@@ -1018,19 +1021,46 @@ def render_heatmap(
     )
 
 
+def display_hour_frame() -> pd.DataFrame:
+    """10 AM through 11 PM, in business-day order."""
+
+    return with_hour_fields(
+        pd.DataFrame(
+            {
+                "hour": list(
+                    range(DISPLAY_START_HOUR, DISPLAY_END_HOUR + 1)
+                )
+            }
+        )
+    )
+
+
+def in_display_window(frame: pd.DataFrame) -> pd.DataFrame:
+    """Keep rows whose clock hour is from 10 AM through 11 PM."""
+
+    if frame.empty or "hour" not in frame.columns:
+        return frame
+    hours = pd.to_numeric(frame["hour"], errors="coerce")
+    return frame.loc[
+        hours.between(DISPLAY_START_HOUR, DISPLAY_END_HOUR)
+    ].copy()
+
+
 def hour_axis(label_order: list[str]) -> alt.X:
     return alt.X(
         "hour_label:N",
         title="Hour",
         sort=label_order,
+        scale=alt.Scale(domain=label_order),
+        axis=alt.Axis(labelAngle=0, labelOverlap=False),
     )
 
 
 st.title("SpLH & Drive-Thru")
 st.caption(
     "Sales per labor hour and drive-thru lane time for the "
-    "same periods. The business day runs from 6:00 AM through "
-    "5:59 AM the next morning. GM shifts are excluded."
+    "same weeks. Hourly charts run from 10:00 AM through "
+    "11:00 PM. GM shifts are excluded."
 )
 
 sales_error = None
@@ -1601,41 +1631,10 @@ row_order = row_meta["period_label"].tolist()
 if len(row_order) > 1:
     row_order = [*row_order, "All"]
 
-hour_parts = []
-if not window_hourly.empty:
-    hour_parts.append(
-        window_hourly.loc[
-            (window_hourly["sales"] > 0)
-            | (window_hourly["labor_hours"] > 0),
-            ["hour"],
-        ]
-    )
-if (
-    not window_cars.empty
-    and "hour" in window_cars.columns
-    and "lane_total" in window_cars.columns
-):
-    hour_parts.append(
-        window_cars.dropna(subset=["hour"])[["hour"]]
-    )
-
-if hour_parts:
-    shared_hours = with_hour_fields(
-        pd.concat(hour_parts, ignore_index=True)
-        .dropna(subset=["hour"])
-        .drop_duplicates()
-    )
-    shared_hours = (
-        shared_hours
-        .sort_values(["hour_index", "hour_label"])
-        .drop_duplicates("hour_label")
-        .reset_index(drop=True)
-    )
-else:
-    shared_hours = pd.DataFrame(
-        columns=["hour", "hour_index", "hour_label"]
-    )
+shared_hours = display_hour_frame()
 hour_order = shared_hours["hour_label"].tolist()
+window_hourly = in_display_window(window_hourly)
+window_cars = in_display_window(window_cars)
 
 st.subheader("SpLH by week")
 
@@ -1747,7 +1746,8 @@ else:
         splh_caption += "The All row pools every week in the selection. "
     st.caption(
         splh_caption
-        + "Hours and weeks match the drive-thru heatmap below."
+        + "Both heatmaps show 10:00 AM through 11:00 PM, "
+        + "with the same weeks."
     )
 
     st.subheader("Drive-thru time by week")
@@ -1863,7 +1863,8 @@ else:
         lane_caption += "The All row pools every week in the selection. "
     st.caption(
         lane_caption
-        + "Hours and weeks match the SpLH heatmap above. "
+        + "Both heatmaps show 10:00 AM through 11:00 PM, "
+        + "with the same weeks. "
         + f"Showing {window_text}."
     )
 
@@ -1878,7 +1879,7 @@ if (
     active_hours = active_hours.loc[
         (active_hours["sales"] > 0) | (active_hours["labor_hours"] > 0)
     ].sort_values("hour_index")
-    hour_label_order = active_hours["hour_label"].drop_duplicates().tolist()
+    hour_label_order = hour_order
     rate_tooltip = [
         alt.Tooltip("hour_label:N", title="Hour"),
         alt.Tooltip(
@@ -1935,7 +1936,8 @@ if (
     )
     st.caption(
         "Bars are labor hours on the left axis. The line is "
-        f"sales on the right axis, pooled across {window_text}."
+        f"sales on the right axis, from 10:00 AM through "
+        f"11:00 PM, pooled across {window_text}."
     )
 
     share_hours = active_hours.copy()
@@ -2210,9 +2212,10 @@ else:
             },
         )
         st.caption(
-            f"Hours are pooled across {window_text}. "
-            "Avg cars in lane is the stack still behind a car "
-            "at departure, not the count of cars served."
+            f"Hours from 10:00 AM through 11:00 PM, pooled "
+            f"across {window_text}. Avg cars in lane is the "
+            "stack still behind a car at departure, not the "
+            "count of cars served."
         )
 
 st.caption(

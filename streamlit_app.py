@@ -9,12 +9,12 @@ st.set_page_config(
 
 navigation = st.navigation(
     [
-        st.Page(
-            "views/week_over_week.py",
-            title="Sales: Week Over Week",
-            icon="📈",
-            default=True,
-        ),
+        # st.Page(
+        #     "views/week_over_week.py",
+        #     title="Sales: Week Over Week",
+        #     icon="📈",
+        #     default=True,
+        # ),
         st.Page(
             "views/sales_growth.py",
             title="Sales Growth",
@@ -35,16 +35,16 @@ navigation = st.navigation(
             title="SpLH per Hour",
             icon="💵",
         ),
-        st.Page(
-            "views/drive_thru_times.py",
-            title="Drive-Thru Times",
-            icon="🚗",
-        ),
-        st.Page(
-            "views/splh_drive_thru.py",
-            title="SpLH & Drive-Thru",
-            icon="⏱️",
-        ),
+        # st.Page(
+        #     "views/drive_thru_times.py",
+        #     title="Drive-Thru Times",
+        #     icon="🚗",
+        # ),
+        # st.Page(
+        #     "views/splh_drive_thru.py",
+        #     title="SpLH & Drive-Thru",
+        #     icon="⏱️",
+        # ),
         st.Page(
             "views/combo_mix.py",
             title="Combo Mix",

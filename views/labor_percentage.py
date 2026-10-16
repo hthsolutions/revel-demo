@@ -1842,6 +1842,13 @@ else:
             on="period_index",
             how="inner",
         )
+        ot_role_df, ot_role_order = rank_stack(
+            ot_role_df,
+            "role",
+            "ot_labor",
+        )
+    else:
+        ot_role_order = []
 
     ot_by_period = (
         labor_period_days
@@ -1957,9 +1964,12 @@ else:
                     "role:N",
                     title="Role",
                     scale=alt.Scale(scheme="tableau10"),
+                    sort=ot_role_order,
+                ),
+                order=alt.Order(
+                    "stack_rank:Q",
                     sort="ascending",
                 ),
-                order=alt.Order("role:N", sort="ascending"),
                 opacity=alt.condition(
                     alt.datum.is_complete,
                     alt.value(0.85),
@@ -2064,8 +2074,9 @@ else:
     st.caption(
         "Each bar uses the same periods as the charts above. "
         "Bars are overtime pay on the left axis, split by "
-        "role. Hover a segment for that role's overtime hours "
-        "and overtime pay. The right axis is overtime pay "
+        "role. The largest overtime role sits at the bottom "
+        "of each bar. Hover a segment for that role's overtime "
+        "hours and overtime pay. The right axis is overtime pay "
         "as a percent of total labor. Total OT hours on the "
         "line exclude the GM role."
     )

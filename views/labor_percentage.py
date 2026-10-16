@@ -1,21 +1,16 @@
-from datetime import timedelta
-
 import altair as alt
 import pandas as pd
 import streamlit as st
 
 from revel_data import (
     NOT_AVAILABLE,
-    WEEK_START_OPTIONS,
     MissingSecretError,
-    add_week_columns,
     escape_dollar_signs,
     format_metric_value,
     load_salary_data,
     load_sales_data,
     load_shift_data,
     percent_change,
-    reindex_weekly,
 )
 
 
@@ -52,17 +47,8 @@ INTERVALS = {
     },
 }
 
+# Columns summed when rolling daily labor up to a period.
 PERIOD_SUM_COLUMNS = [
-    "net_sales",
-    "hourly_labor",
-    "gm_labor",
-    "dm_labor",
-    "other_salary_labor",
-    "total_labor",
-]
-
-# Columns summed when rolling daily labor up to a week.
-WEEKLY_SUM_COLUMNS = [
     "net_sales",
     "hourly_labor",
     "gm_labor",
@@ -302,7 +288,7 @@ def build_labor_period_frame(
     duration = int(duration)
     sum_columns = [
         column_name
-        for column_name in [*PERIOD_SUM_COLUMNS, "labor_hours"]
+        for column_name in PERIOD_SUM_COLUMNS
         if column_name in frame.columns
     ]
 
@@ -397,13 +383,32 @@ def build_labor_period_frame(
     calendar["is_complete"] = (
         calendar["days_counted"] >= period_days
     )
-    calendar["labor_percent"] = (
-        safe_ratio(
-            calendar["total_labor"],
-            calendar["net_sales"],
+
+    # A period rate is total dollars over total sales, not
+    # the average of the daily rates.
+    rate_sources = [
+        ("labor_percent", "total_labor", "net_sales"),
+        ("hourly_percent", "hourly_labor", "net_sales"),
+        ("gm_percent", "gm_labor", "net_sales"),
+        ("dm_percent", "dm_labor", "net_sales"),
+        ("other_percent", "other_salary_labor", "net_sales"),
+        ("ot_labor_percent", "ot_labor", "total_labor"),
+    ]
+
+    for rate_name, numerator, denominator in rate_sources:
+        if (
+            numerator not in calendar.columns
+            or denominator not in calendar.columns
+        ):
+            continue
+
+        calendar[rate_name] = (
+            safe_ratio(
+                calendar[numerator],
+                calendar[denominator],
+            )
+            * 100
         )
-        * 100
-    )
 
     include_year = (
         calendar["period_start"].min().year
@@ -424,11 +429,22 @@ def build_labor_period_frame(
         )
     ]
 
-    return (
+    calendar = (
         calendar
         .sort_values("period_end")
         .reset_index(drop=True)
     )
+
+    if "labor_percent" in calendar.columns:
+        calendar["previous_labor_percent"] = calendar[
+            "labor_percent"
+        ].shift(1)
+        calendar["labor_percent_change"] = (
+            calendar["labor_percent"]
+            - calendar["previous_labor_percent"]
+        )
+
+    return calendar
 
 
 def rows_in_periods(
@@ -479,6 +495,69 @@ def rows_in_periods(
     return tagged.loc[
         tagged["period_index"].between(0, duration - 1)
     ].copy()
+
+
+def count_employees_by_period(
+    shift_frame: pd.DataFrame,
+    labor_frame: pd.DataFrame,
+    date_end,
+    period_days: int,
+    duration: int,
+) -> pd.DataFrame:
+    """Unique employees on days that count toward each period."""
+
+    empty = pd.DataFrame(
+        {
+            "period_index": pd.Series(dtype="int64"),
+            "employee_count": pd.Series(dtype="int64"),
+        }
+    )
+
+    if (
+        shift_frame.empty
+        or labor_frame.empty
+        or "employee" not in shift_frame.columns
+    ):
+        return empty
+
+    tagged = rows_in_periods(
+        shift_frame,
+        date_end,
+        period_days,
+        duration,
+    )
+
+    if tagged.empty:
+        return empty
+
+    labor_days = (
+        labor_frame[["business_date", "location_key"]]
+        .drop_duplicates()
+        .copy()
+    )
+    labor_days["business_date"] = pd.to_datetime(
+        labor_days["business_date"]
+    ).dt.normalize()
+
+    tagged = tagged.merge(
+        labor_days,
+        on=["business_date", "location_key"],
+        how="inner",
+    )
+
+    if tagged.empty:
+        return empty
+
+    counted = (
+        tagged
+        .groupby("period_index", as_index=False)
+        .agg(employee_count=("employee", "nunique"))
+    )
+    counted["employee_count"] = (
+        counted["employee_count"].astype(int)
+    )
+
+    return counted
 
 
 st.title("Labor % of Net Sales")
@@ -729,10 +808,8 @@ selected_interval = st.sidebar.selectbox(
     help=(
         "Periods are counted backward from Date end. "
         "A week is 7 days and a month is 30 days. "
-        "This sets the summary metrics and the "
-        "labor charts: Labor Dollars and Labor Rate, "
-        "Labor Dollars by Role, and Total OT Labor $ "
-        "per Period."
+        "This sets the summary metrics, the labor "
+        "charts, and the labor breakdown table."
     ),
 )
 
@@ -759,8 +836,8 @@ date_end = st.sidebar.date_input(
     max_value=max_date,
     key=date_key,
     help=(
-        "Last business date included in the summary "
-        "and the labor charts."
+        "Last business date included in the summary, "
+        "the labor charts, and the breakdown table."
     ),
 )
 
@@ -785,41 +862,15 @@ duration = st.sidebar.number_input(
 duration = int(duration)
 
 if period_days == 1:
-    st.sidebar.caption("Each bar is one business day.")
+    st.sidebar.caption("Each period is one business day.")
 elif period_days == 7:
     st.sidebar.caption(
-        "Each bar is 7 days, ending on Date end."
+        "Each period is 7 days, ending on Date end."
     )
 else:
     st.sidebar.caption(
-        "Each bar is 30 days, ending on Date end."
+        "Each period is 30 days, ending on Date end."
     )
-
-selected_week_start_name = st.sidebar.selectbox(
-    "Week starts on",
-    options=list(WEEK_START_OPTIONS.keys()),
-)
-
-week_start_weekday = WEEK_START_OPTIONS[
-    selected_week_start_name
-]
-
-weeks_to_display = st.sidebar.slider(
-    "Weeks to display",
-    min_value=2,
-    max_value=26,
-    value=8,
-)
-
-match_partial_week = st.sidebar.checkbox(
-    "Compare week to date",
-    value=True,
-    help=(
-        "Trim every week to the same number of days as the "
-        "most recent week so a partial week is not compared "
-        "with a full one."
-    ),
-)
 
 hourly_target_percent = st.sidebar.number_input(
     "Hourly labor %",
@@ -932,8 +983,6 @@ labor_df["sales_per_labor_hour"] = safe_ratio(
     labor_df["labor_hours"],
 )
 
-labor_df = add_week_columns(labor_df, week_start_weekday)
-
 
 # ---------------------------------------------------------
 # Coverage: labor data usually lags the sales feed
@@ -971,122 +1020,6 @@ if days_without_salary:
         f"{days_without_salary:,} day(s) have no salaried "
         "pay recorded and count hourly wages only."
     )
-
-
-# ---------------------------------------------------------
-# Weekly aggregation
-# ---------------------------------------------------------
-
-latest_week_start = labor_df["week_start"].max()
-
-latest_week_day_index = int(
-    labor_df.loc[
-        labor_df["week_start"] == latest_week_start,
-        "day_index",
-    ].max()
-)
-
-latest_week_is_partial = latest_week_day_index < 6
-
-comparison_df = labor_df.copy()
-week_to_date_applied = (
-    match_partial_week and latest_week_is_partial
-)
-
-if week_to_date_applied:
-    comparison_df = comparison_df[
-        comparison_df["day_index"] <= latest_week_day_index
-    ].copy()
-
-weekly_df = (
-    comparison_df
-    .groupby("week_start", as_index=False)
-    .agg(
-        **{
-            column_name: (column_name, "sum")
-            for column_name in WEEKLY_SUM_COLUMNS
-        },
-        days_counted=("business_date", "nunique"),
-    )
-    .sort_values("week_start")
-    .reset_index(drop=True)
-)
-
-weekly_df = reindex_weekly(
-    weekly_df,
-    labor_df["week_start"],
-)
-
-weekly_df["days_counted"] = (
-    weekly_df["days_counted"].fillna(0).astype(int)
-)
-
-# A weekly rate is total labor over total sales, not the
-# average of the daily rates, which would weight a slow day
-# the same as a busy one.
-weekly_df["labor_percent"] = (
-    safe_ratio(
-        weekly_df["total_labor"],
-        weekly_df["net_sales"],
-    )
-    * 100
-)
-
-weekly_df["hourly_percent"] = (
-    safe_ratio(
-        weekly_df["hourly_labor"],
-        weekly_df["net_sales"],
-    )
-    * 100
-)
-
-weekly_df["gm_percent"] = (
-    safe_ratio(
-        weekly_df["gm_labor"],
-        weekly_df["net_sales"],
-    )
-    * 100
-)
-
-weekly_df["dm_percent"] = (
-    safe_ratio(
-        weekly_df["dm_labor"],
-        weekly_df["net_sales"],
-    )
-    * 100
-)
-
-weekly_df["other_percent"] = (
-    safe_ratio(
-        weekly_df["other_salary_labor"],
-        weekly_df["net_sales"],
-    )
-    * 100
-)
-
-weekly_df["sales_per_labor_hour"] = safe_ratio(
-    weekly_df["net_sales"],
-    weekly_df["labor_hours"],
-)
-
-weekly_df["previous_labor_percent"] = weekly_df[
-    "labor_percent"
-].shift(1)
-
-# Labor percent is already a percentage, so the week-over-
-# week move is reported in percentage points.
-weekly_df["labor_percent_change"] = (
-    weekly_df["labor_percent"]
-    - weekly_df["previous_labor_percent"]
-)
-
-visible_weeks_df = weekly_df.tail(weeks_to_display).copy()
-
-current_week = weekly_df.iloc[-1]
-
-previous_week = (
-    weekly_df.iloc[-2] if len(weekly_df) >= 2 else None
-)
 
 
 # ---------------------------------------------------------
@@ -1625,13 +1558,6 @@ else:
     )
 
 
-
-visible_week_starts = set(visible_weeks_df["week_start"])
-
-visible_daily_df = labor_df[
-    labor_df["week_start"].isin(visible_week_starts)
-].copy()
-
 # ---------------------------------------------------------
 # Labor dollars by role
 # ---------------------------------------------------------
@@ -2145,107 +2071,175 @@ else:
     )
 
 
-current_week_label = (
-    f"{current_week['week_start']:%b %d}–"
-    f"{current_week['week_start'] + timedelta(days=6):%b %d, %Y}"
-)
+# ---------------------------------------------------------
+# Labor breakdown for the selected interval
+# ---------------------------------------------------------
 
-if latest_week_is_partial:
-    days_in_current_week = int(current_week["days_counted"])
-
-    if week_to_date_applied:
-        st.caption(
-            f"The week of {current_week_label} has "
-            f"{days_in_current_week} day(s) of labor data. "
-            "The tables below trim every week to the same days."
-        )
-    else:
-        st.caption(
-            f"The week of {current_week_label} has only "
-            f"{days_in_current_week} day(s) of labor data "
-            "and is compared against full prior weeks."
-        )
-
-# Trimming can empty a prior week completely when its labor
-# records land on different weekdays than the current week.
-if (
-    week_to_date_applied
-    and previous_week is not None
-    and int(previous_week["days_counted"]) == 0
-    and (
-        labor_df["week_start"] == previous_week["week_start"]
-    ).any()
+with st.expander(
+    f"View {selected_interval.lower()} labor breakdown"
 ):
-    st.info(
-        "The previous week has labor records, but none on "
-        "the same weekdays as the current week, so the "
-        "week-to-date comparison is empty. Turn off "
-        "\"Compare week to date\" to compare whole weeks."
-    )
+    if date_end is None:
+        st.caption("Pick a date end to see the breakdown.")
+    else:
+        # One extra period supplies Prior Labor % for the
+        # oldest row, then drops out of the table.
+        breakdown_df = build_labor_period_frame(
+            labor_df,
+            date_end,
+            period_days,
+            duration + 1,
+        )
+        employee_counts = count_employees_by_period(
+            shift_df,
+            labor_df,
+            date_end,
+            period_days,
+            duration,
+        )
+        breakdown_df = breakdown_df.merge(
+            employee_counts,
+            on="period_index",
+            how="left",
+        )
+        breakdown_df = breakdown_df.loc[
+            breakdown_df["period_index"] < duration
+        ].copy()
 
+        missing_period = breakdown_df["days_counted"].eq(0)
+        reported_period = ~missing_period
+        breakdown_df.loc[missing_period, "employee_count"] = (
+            pd.NA
+        )
+        breakdown_df.loc[reported_period, "employee_count"] = (
+            breakdown_df.loc[
+                reported_period,
+                "employee_count",
+            ].fillna(0)
+        )
+        breakdown_df["employee_count"] = (
+            breakdown_df["employee_count"].astype("Int64")
+        )
+        breakdown_df["labor_vs_target"] = (
+            breakdown_df["labor_percent"]
+            - float(target_labor_percent)
+        )
 
-# ---------------------------------------------------------
-# Weekly and daily tables
-# ---------------------------------------------------------
+        show_other_salary = (
+            "other_salary_labor" in breakdown_df.columns
+            and breakdown_df["other_salary_labor"]
+            .fillna(0)
+            .sum()
+            > 0
+        )
 
-with st.expander("View weekly labor breakdown"):
-    weekly_table_df = visible_weeks_df[
-        [
-            "week_start",
+        display_columns = [
+            "period_start",
+            "period_end",
             "days_counted",
             "net_sales",
             "hourly_labor",
             "gm_labor",
             "dm_labor",
-            "total_labor",
-            "labor_percent",
-            "previous_labor_percent",
-            "labor_percent_change",
-            "labor_hours",
-            "sales_per_labor_hour",
         ]
-    ].copy()
 
-    weekly_table_df["week_start"] = weekly_table_df[
-        "week_start"
-    ].dt.date
+        if show_other_salary:
+            display_columns.append("other_salary_labor")
 
-    weekly_table_df = weekly_table_df.sort_values(
-        "week_start",
-        ascending=False,
-    )
+        display_columns.extend(
+            [
+                "total_labor",
+                "ot_labor",
+                "labor_percent",
+                "previous_labor_percent",
+                "labor_percent_change",
+                "labor_vs_target",
+                "hourly_percent",
+                "gm_percent",
+                "dm_percent",
+            ]
+        )
 
-    st.dataframe(
-        weekly_table_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "week_start": st.column_config.DateColumn(
-                "Week Starting",
+        if show_other_salary:
+            display_columns.append("other_percent")
+
+        display_columns.extend(
+            [
+                "ot_labor_percent",
+                "labor_hours",
+                "ot_hours",
+                "sales_per_labor_hour",
+                "employee_count",
+            ]
+        )
+        display_columns = [
+            column_name
+            for column_name in display_columns
+            if column_name in breakdown_df.columns
+        ]
+
+        table_df = (
+            breakdown_df[display_columns]
+            .sort_values("period_end", ascending=False)
+            .copy()
+        )
+        table_df["period_start"] = table_df[
+            "period_start"
+        ].dt.date
+        table_df["period_end"] = table_df["period_end"].dt.date
+
+        st.caption(
+            f"{duration} {interval['unit']} ending "
+            f"{pd.Timestamp(date_end):%b %d, %Y}, "
+            "newest first. Dollars are summed, and each "
+            "rate uses those totals. Employees is the "
+            "number of distinct people with a shift on a "
+            "day that has both sales and labor."
+        )
+
+        column_config = {
+            "period_start": st.column_config.DateColumn(
+                "Period start",
+            ),
+            "period_end": st.column_config.DateColumn(
+                "Period end",
             ),
             "days_counted": st.column_config.NumberColumn(
                 "Days",
                 format="%d",
+                help=(
+                    f"Days in this period with both sales "
+                    f"and labor. A full period is "
+                    f"{period_days}."
+                ),
             ),
             "net_sales": st.column_config.NumberColumn(
                 "Net Sales",
-                format="$%.0f",
+                format="$%,.0f",
             ),
             "hourly_labor": st.column_config.NumberColumn(
                 "Hourly",
-                format="$%.0f",
+                format="$%,.0f",
             ),
             "gm_labor": st.column_config.NumberColumn(
                 "GM",
-                format="$%.0f",
+                format="$%,.0f",
             ),
             "dm_labor": st.column_config.NumberColumn(
                 "DM",
-                format="$%.0f",
+                format="$%,.0f",
+            ),
+            "other_salary_labor": st.column_config.NumberColumn(
+                "Other salary",
+                format="$%,.0f",
             ),
             "total_labor": st.column_config.NumberColumn(
                 "Total Labor",
-                format="$%.0f",
+                format="$%,.0f",
+            ),
+            "ot_labor": st.column_config.NumberColumn(
+                "OT Labor",
+                format="$%,.0f",
+                help="Overtime pay, including the GM role.",
             ),
             "labor_percent": st.column_config.NumberColumn(
                 "Labor %",
@@ -2261,105 +2255,91 @@ with st.expander("View weekly labor breakdown"):
                 st.column_config.NumberColumn(
                     "Change (pts)",
                     format="%.2f",
+                    help=(
+                        "Labor % minus the previous "
+                        "period's labor %, in points."
+                    ),
                 )
             ),
-            "labor_hours": st.column_config.NumberColumn(
-                "Hourly Hours",
-                format="%.1f",
+            "labor_vs_target": st.column_config.NumberColumn(
+                "vs Target (pts)",
+                format="%.2f",
+                help=(
+                    "Labor % minus the target in the "
+                    "sidebar. Positive is above target."
+                ),
             ),
-            "sales_per_labor_hour": (
-                st.column_config.NumberColumn(
-                    "Sales / Hour",
-                    format="$%.0f",
-                )
-            ),
-        },
-    )
-
-with st.expander("View daily labor records"):
-    daily_table_df = visible_daily_df[
-        [
-            "business_date",
-            "location",
-            "net_sales",
-            "hourly_labor",
-            "gm_labor",
-            "dm_labor",
-            "total_labor",
-            "labor_percent",
-            "labor_hours",
-            "ot_hours",
-            "sales_per_labor_hour",
-            "employee_count",
-        ]
-    ].copy()
-
-    daily_table_df["business_date"] = daily_table_df[
-        "business_date"
-    ].dt.date
-
-    daily_table_df = daily_table_df.sort_values(
-        "business_date",
-        ascending=False,
-    )
-
-    st.dataframe(
-        daily_table_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "business_date": st.column_config.DateColumn(
-                "Business Date",
-            ),
-            "location": "Location",
-            "net_sales": st.column_config.NumberColumn(
-                "Net Sales",
-                format="$%.0f",
-            ),
-            "hourly_labor": st.column_config.NumberColumn(
-                "Hourly",
-                format="$%.0f",
-            ),
-            "gm_labor": st.column_config.NumberColumn(
-                "GM",
-                format="$%.0f",
-            ),
-            "dm_labor": st.column_config.NumberColumn(
-                "DM",
-                format="$%.0f",
-            ),
-            "total_labor": st.column_config.NumberColumn(
-                "Total Labor",
-                format="$%.0f",
-            ),
-            "labor_percent": st.column_config.NumberColumn(
-                "Labor %",
+            "hourly_percent": st.column_config.NumberColumn(
+                "Hourly %",
                 format="%.2f%%",
             ),
+            "gm_percent": st.column_config.NumberColumn(
+                "GM %",
+                format="%.2f%%",
+            ),
+            "dm_percent": st.column_config.NumberColumn(
+                "DM %",
+                format="%.2f%%",
+            ),
+            "other_percent": st.column_config.NumberColumn(
+                "Other %",
+                format="%.2f%%",
+            ),
+            "ot_labor_percent": st.column_config.NumberColumn(
+                "OT % of Labor",
+                format="%.2f%%",
+                help="Overtime pay as a percent of total labor.",
+            ),
             "labor_hours": st.column_config.NumberColumn(
                 "Hourly Hours",
                 format="%.1f",
+                help=(
+                    "Hourly shift hours. GM, DM, and other "
+                    "salaried roles are excluded."
+                ),
             ),
             "ot_hours": st.column_config.NumberColumn(
                 "OT Hours",
                 format="%.1f",
+                help=(
+                    "Overtime hours from the shift feed, "
+                    "including the GM role."
+                ),
             ),
             "sales_per_labor_hour": (
                 st.column_config.NumberColumn(
                     "Sales / Hour",
-                    format="$%.0f",
+                    format="$%,.0f",
+                    help=(
+                        "Net sales divided by hourly shift "
+                        "hours."
+                    ),
                 )
             ),
             "employee_count": st.column_config.NumberColumn(
                 "Employees",
                 format="%d",
             ),
-        },
+        }
+
+        st.dataframe(
+            table_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                column_name: column_config[column_name]
+                for column_name in display_columns
+            },
+        )
+
+
+if date_end is None:
+    st.caption(
+        f"Labor for {selected_location.lower()}."
     )
-
-
-st.caption(
-    f"Displaying {len(visible_weeks_df):,} week(s) of labor "
-    f"for {selected_location.lower()}, weeks starting "
-    f"{selected_week_start_name}."
-)
+else:
+    st.caption(
+        f"Displaying {duration:,} {interval['unit']} of labor "
+        f"for {selected_location.lower()}, ending "
+        f"{pd.Timestamp(date_end):%b %d, %Y}."
+    )

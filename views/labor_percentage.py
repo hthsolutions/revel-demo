@@ -876,7 +876,7 @@ hourly_target_percent = st.sidebar.number_input(
     "Hourly labor %",
     min_value=0.0,
     max_value=100.0,
-    value=20.0,
+    value=18.0,
     step=0.5,
     help="Target for hourly shift wages as a percent of net sales.",
 )
@@ -885,7 +885,7 @@ gm_target_percent = st.sidebar.number_input(
     "GM labor %",
     min_value=0.0,
     max_value=100.0,
-    value=5.0,
+    value=3.0,
     step=0.5,
     help="Target for GM salary as a percent of net sales.",
 )
@@ -894,7 +894,7 @@ dm_target_percent = st.sidebar.number_input(
     "DM labor %",
     min_value=0.0,
     max_value=100.0,
-    value=0.0,
+    value=1.0,
     step=0.5,
     help="Target for DM salary as a percent of net sales.",
 )

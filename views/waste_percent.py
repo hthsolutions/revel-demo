@@ -193,19 +193,30 @@ def daily_waste(
             daily[column] = 0.0
         daily[column] = daily[column].fillna(0)
 
-    usable = daily["net_sales"].notna() & (daily["net_sales"] != 0)
-    daily["chicken_percent"] = float("nan")
-    daily["fries_percent"] = float("nan")
-    daily.loc[usable, "chicken_percent"] = (
-        daily.loc[usable, "chicken_waste"]
-        / daily.loc[usable, "net_sales"]
-        * 100
-    )
-    daily.loc[usable, "fries_percent"] = (
-        daily.loc[usable, "fries_waste"]
-        / daily.loc[usable, "net_sales"]
-        * 100
-    )
+    sales = pd.to_numeric(daily["net_sales"], errors="coerce")
+    usable = sales.notna() & (sales != 0)
+
+    def waste_percent(waste_column: str) -> pd.Series:
+        """Waste dollars as a percent of net sales, on days with sales."""
+
+        percent = pd.Series(float("nan"), index=daily.index, dtype="float64")
+        # Pandas 3 raises if an empty slice is written into a float column.
+        if not bool(usable.any()):
+            return percent
+        waste = pd.to_numeric(daily[waste_column], errors="coerce")
+        waste_values = waste.loc[usable].to_numpy(
+            dtype="float64",
+            na_value=float("nan"),
+        )
+        sales_values = sales.loc[usable].to_numpy(
+            dtype="float64",
+            na_value=float("nan"),
+        )
+        percent.loc[usable] = waste_values / sales_values * 100
+        return percent
+
+    daily["chicken_percent"] = waste_percent("chicken_waste")
+    daily["fries_percent"] = waste_percent("fries_waste")
     return daily.sort_values(
         ["business_date", "location"]
     ).reset_index(drop=True)

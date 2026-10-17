@@ -597,7 +597,7 @@ def employee_name_lists(
         detail
         .groupby(group_columns, as_index=False)["employee"]
         .agg(
-            lambda names: ", ".join(
+            lambda names: " | ".join(
                 sorted(
                     {
                         str(name).strip()

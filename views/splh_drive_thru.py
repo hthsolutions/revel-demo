@@ -503,6 +503,8 @@ def labor_hours_by_hour(shift_df: pd.DataFrame) -> pd.DataFrame:
             "location",
             "business_date",
             "hour",
+            "employee",
+            "role",
             "labor_hours",
         ]
     )
@@ -517,6 +519,8 @@ def labor_hours_by_hour(shift_df: pd.DataFrame) -> pd.DataFrame:
             shift.clock_out,
             shift.hours,
         )
+        employee = str(getattr(shift, "employee", "Unknown") or "Unknown")
+        role = str(getattr(shift, "role", "Unassigned") or "Unassigned")
         for business_date, hour, worked in allocate_shift_hours(
             clock_in,
             clock_out,
@@ -527,6 +531,8 @@ def labor_hours_by_hour(shift_df: pd.DataFrame) -> pd.DataFrame:
                     "location": shift.location,
                     "business_date": business_date,
                     "hour": hour,
+                    "employee": employee,
+                    "role": role,
                     "labor_hours": worked,
                 }
             )
@@ -541,11 +547,138 @@ def labor_hours_by_hour(shift_df: pd.DataFrame) -> pd.DataFrame:
     return (
         placed
         .groupby(
+            [
+                "location_key",
+                "location",
+                "business_date",
+                "hour",
+                "employee",
+                "role",
+            ],
+            as_index=False,
+        )["labor_hours"]
+        .sum()
+    )
+
+
+def labor_hour_totals(detail: pd.DataFrame) -> pd.DataFrame:
+    """Labor hours per store, business date, and clock hour."""
+
+    empty = pd.DataFrame(
+        columns=[
+            "location_key",
+            "location",
+            "business_date",
+            "hour",
+            "labor_hours",
+        ]
+    )
+    if detail.empty:
+        return empty
+    return (
+        detail
+        .groupby(
             ["location_key", "location", "business_date", "hour"],
             as_index=False,
         )["labor_hours"]
         .sum()
     )
+
+
+def replace_labor_hours(
+    combined: pd.DataFrame,
+    detail: pd.DataFrame,
+) -> pd.DataFrame:
+    """Swap in labor hours for the selected employees and roles."""
+
+    frame = combined.drop(columns=["labor_hours"], errors="ignore")
+    totals = labor_hour_totals(detail)
+    if totals.empty:
+        frame["labor_hours"] = 0.0
+        return frame
+    totals = totals.drop(columns=["location"], errors="ignore")
+    frame = frame.merge(
+        totals,
+        on=["location_key", "business_date", "hour"],
+        how="left",
+    )
+    frame["labor_hours"] = frame["labor_hours"].fillna(0.0)
+    return frame
+
+
+def employee_name_lists(
+    detail: pd.DataFrame,
+    group_columns: list[str],
+) -> pd.DataFrame:
+    """Comma-separated employee names for each heatmap cell."""
+
+    if detail.empty:
+        return pd.DataFrame(columns=[*group_columns, "employees"])
+    listed = (
+        detail
+        .groupby(group_columns, as_index=False)["employee"]
+        .agg(
+            lambda names: ", ".join(
+                sorted(
+                    {
+                        str(name).strip()
+                        for name in names
+                        if str(name).strip()
+                    }
+                )
+            )
+        )
+    )
+    return listed.rename(columns={"employee": "employees"})
+
+
+def attach_employee_names(
+    grid: pd.DataFrame,
+    detail: pd.DataFrame,
+) -> pd.DataFrame:
+    """Add the people clocked in for each week and hour."""
+
+    labeled = grid.copy()
+    labeled["employees"] = "—"
+    if detail.empty or labeled.empty:
+        return labeled
+
+    by_period = employee_name_lists(
+        detail,
+        ["period_index", "hour"],
+    )
+    if "period_index" in labeled.columns and not by_period.empty:
+        labeled = labeled.drop(columns=["employees"]).merge(
+            by_period,
+            on=["period_index", "hour"],
+            how="left",
+        )
+    by_hour = employee_name_lists(detail, ["hour"])
+    if "row_label" in labeled.columns and not by_hour.empty:
+        hour_names = dict(
+            zip(by_hour["hour"], by_hour["employees"])
+        )
+        all_rows = labeled["row_label"].eq("All")
+        labeled.loc[all_rows, "employees"] = (
+            labeled.loc[all_rows, "hour"].map(hour_names)
+        )
+    labeled["employees"] = labeled["employees"].fillna("—")
+    labeled.loc[labeled["employees"].eq(""), "employees"] = "—"
+    return labeled
+
+
+def keep_multiselect(key: str, options: list[str]) -> list[str]:
+    """Keep a multiselect on the options that still exist."""
+
+    if key not in st.session_state:
+        st.session_state[key] = options
+        return options
+    previous = list(st.session_state[key])
+    kept = [item for item in previous if item in options]
+    if previous and not kept:
+        kept = list(options)
+    st.session_state[key] = kept
+    return kept
 
 
 def empty_hourly_frame() -> pd.DataFrame:
@@ -1121,16 +1254,28 @@ except Exception as error:
     hme_df = pd.DataFrame()
     hme_error = str(error)
 
-if not shift_df.empty and "role" in shift_df.columns:
-    shift_df = shift_df[
-        shift_df["role"].astype(str).str.strip().str.upper() != "GM"
-    ].copy()
+if not shift_df.empty:
+    if "role" not in shift_df.columns:
+        shift_df["role"] = "Unassigned"
+    shift_df["role"] = (
+        shift_df["role"].fillna("Unassigned").astype(str).str.strip()
+    )
+    shift_df.loc[shift_df["role"] == "", "role"] = "Unassigned"
+    if "employee" not in shift_df.columns:
+        shift_df["employee"] = "Unknown"
+    shift_df["employee"] = (
+        shift_df["employee"].fillna("Unknown").astype(str).str.strip()
+    )
+    shift_df.loc[shift_df["employee"] == "", "employee"] = "Unknown"
+    shift_df = shift_df[shift_df["role"].str.upper() != "GM"].copy()
 
 sales_hours, quarter_df, sales_skipped = prepare_hourly_sales(sales_df)
 labor_error = None
 try:
-    labor_df = labor_hours_by_hour(shift_df)
+    labor_detail = labor_hours_by_hour(shift_df)
+    labor_df = labor_hour_totals(labor_detail)
 except Exception as error:
+    labor_detail = pd.DataFrame()
     labor_df = pd.DataFrame()
     labor_error = str(error)
 
@@ -1231,6 +1376,16 @@ if selected_location != "All Locations":
         ].copy()
     hme_df = hme_df[hme_df["location"] == selected_location].copy()
 
+if not labor_detail.empty and selected_location != "All Locations":
+    location_keys = set()
+    if not combined.empty and "location_key" in combined.columns:
+        location_keys.update(combined["location_key"].dropna().tolist())
+    if not hme_df.empty and "location_key" in hme_df.columns:
+        location_keys.update(hme_df["location_key"].dropna().tolist())
+    labor_detail = labor_detail[
+        labor_detail["location_key"].isin(location_keys)
+    ].copy()
+
 if combined.empty and hme_df.empty:
     st.warning("No sales, labor, or drive-thru times match that location.")
     st.stop()
@@ -1292,6 +1447,57 @@ selected_weekday = st.sidebar.selectbox(
         "All days keeps the full 7 days."
     ),
 )
+
+if not labor_detail.empty:
+    available_roles = sorted(
+        labor_detail["role"].dropna().unique(),
+        key=str.lower,
+    )
+    keep_multiselect("splh_drive_thru_roles", available_roles)
+    selected_roles = st.sidebar.multiselect(
+        "Roles",
+        options=available_roles,
+        key="splh_drive_thru_roles",
+        placeholder="Select roles",
+        help=(
+            "Labor hours and the employee names use these "
+            "roles. Sales and drive-thru times stay for the "
+            "whole selection."
+        ),
+    )
+    if not selected_roles:
+        st.info("Select at least one role.")
+        st.stop()
+    labor_detail = labor_detail[
+        labor_detail["role"].isin(selected_roles)
+    ].copy()
+
+    available_employees = sorted(
+        labor_detail["employee"].dropna().unique(),
+        key=str.lower,
+    )
+    keep_multiselect(
+        "splh_drive_thru_employees",
+        available_employees,
+    )
+    selected_employees = st.sidebar.multiselect(
+        "Employees",
+        options=available_employees,
+        key="splh_drive_thru_employees",
+        placeholder="Select employees",
+        help=(
+            "Labor hours and the employee names use these "
+            "people. Sales and drive-thru times stay for the "
+            "whole selection."
+        ),
+    )
+    if not selected_employees:
+        st.info("Select at least one employee.")
+        st.stop()
+    labor_detail = labor_detail[
+        labor_detail["employee"].isin(selected_employees)
+    ].copy()
+    combined = replace_labor_hours(combined, labor_detail)
 
 st.sidebar.header("Color breaks")
 GREEN_SPLH = float(
@@ -1376,6 +1582,12 @@ if date_end is None:
 # One extra period supplies the comparison for the latest bucket.
 calendar = build_period_calendar(date_end, period_days, duration + 1)
 combined = rows_in_periods(combined, date_end, period_days, duration + 1)
+labor_detail = rows_in_periods(
+    labor_detail,
+    date_end,
+    period_days,
+    duration + 1,
+)
 quarter_df = rows_in_periods(
     quarter_df,
     date_end,
@@ -1384,6 +1596,7 @@ quarter_df = rows_in_periods(
 )
 hme_df = rows_in_periods(hme_df, date_end, period_days, duration + 1)
 combined = keep_weekday(combined, selected_weekday)
+labor_detail = keep_weekday(labor_detail, selected_weekday)
 quarter_df = keep_weekday(quarter_df, selected_weekday)
 hme_df = keep_weekday(hme_df, selected_weekday)
 
@@ -1621,6 +1834,12 @@ shared_hours = display_hour_frame()
 hour_order = shared_hours["hour_label"].tolist()
 window_hourly = in_display_window(window_hourly)
 window_cars = in_display_window(window_cars)
+window_labor = labor_detail.loc[
+    labor_detail["period_index"] < duration
+].copy() if (
+    not labor_detail.empty and "period_index" in labor_detail.columns
+) else labor_detail.iloc[0:0]
+window_labor = in_display_window(window_labor)
 
 st.subheader("SpLH by week")
 
@@ -1673,6 +1892,8 @@ else:
             )
         splh_grid = pd.concat([splh_grid, all_grid], ignore_index=True)
 
+    splh_grid = attach_employee_names(splh_grid, window_labor)
+
     scale_top = splh_scale_top(
         splh_grid["sales_per_labor_hour"].max(skipna=True)
     )
@@ -1706,6 +1927,7 @@ else:
                 title="Labor Hours",
                 format=",.2f",
             ),
+            alt.Tooltip("employees:N", title="Employees"),
             alt.Tooltip(
                 "transactions:Q",
                 title="Transactions",
@@ -1733,7 +1955,8 @@ else:
     st.caption(
         splh_caption
         + "Both heatmaps show 10:00 AM through 11:00 PM, "
-        + "with the same weeks."
+        + "with the same weeks. Employee names are the "
+        + "people clocked in during that hour."
     )
 
     st.subheader("Drive-thru time by week")
@@ -1795,6 +2018,8 @@ else:
             all_grid["lane_total_label"] = pd.NA
         lane_grid = pd.concat([lane_grid, all_grid], ignore_index=True)
 
+    lane_grid = attach_employee_names(lane_grid, window_labor)
+
     lane_scale = lane_scale_top(lane_grid["minutes"].max(skipna=True))
     lane_grid = paint_heatmap(
         lane_grid,
@@ -1828,6 +2053,7 @@ else:
                 title="Avg cars in lane per departure event",
                 format=".2f",
             ),
+            alt.Tooltip("employees:N", title="Employees"),
         ],
         heatmap_legend(
             lane_scale,
@@ -1851,7 +2077,8 @@ else:
     st.caption(
         lane_caption
         + "Both heatmaps show 10:00 AM through 11:00 PM, "
-        + "with the same weeks. "
+        + "with the same weeks. Employee names are the "
+        + "people clocked in during that hour. "
         + f"Showing {window_text}."
     )
 

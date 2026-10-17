@@ -585,27 +585,6 @@ def labor_hour_totals(detail: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def replace_labor_hours(
-    combined: pd.DataFrame,
-    detail: pd.DataFrame,
-) -> pd.DataFrame:
-    """Swap in labor hours for the selected employees and roles."""
-
-    frame = combined.drop(columns=["labor_hours"], errors="ignore")
-    totals = labor_hour_totals(detail)
-    if totals.empty:
-        frame["labor_hours"] = 0.0
-        return frame
-    totals = totals.drop(columns=["location"], errors="ignore")
-    frame = frame.merge(
-        totals,
-        on=["location_key", "business_date", "hour"],
-        how="left",
-    )
-    frame["labor_hours"] = frame["labor_hours"].fillna(0.0)
-    return frame
-
-
 def employee_name_lists(
     detail: pd.DataFrame,
     group_columns: list[str],
@@ -665,20 +644,6 @@ def attach_employee_names(
     labeled["employees"] = labeled["employees"].fillna("—")
     labeled.loc[labeled["employees"].eq(""), "employees"] = "—"
     return labeled
-
-
-def keep_multiselect(key: str, options: list[str]) -> list[str]:
-    """Keep a multiselect on the options that still exist."""
-
-    if key not in st.session_state:
-        st.session_state[key] = options
-        return options
-    previous = list(st.session_state[key])
-    kept = [item for item in previous if item in options]
-    if previous and not kept:
-        kept = list(options)
-    st.session_state[key] = kept
-    return kept
 
 
 def empty_hourly_frame() -> pd.DataFrame:
@@ -1447,57 +1412,6 @@ selected_weekday = st.sidebar.selectbox(
         "All days keeps the full 7 days."
     ),
 )
-
-if not labor_detail.empty:
-    available_roles = sorted(
-        labor_detail["role"].dropna().unique(),
-        key=str.lower,
-    )
-    keep_multiselect("splh_drive_thru_roles", available_roles)
-    selected_roles = st.sidebar.multiselect(
-        "Roles",
-        options=available_roles,
-        key="splh_drive_thru_roles",
-        placeholder="Select roles",
-        help=(
-            "Labor hours and the employee names use these "
-            "roles. Sales and drive-thru times stay for the "
-            "whole selection."
-        ),
-    )
-    if not selected_roles:
-        st.info("Select at least one role.")
-        st.stop()
-    labor_detail = labor_detail[
-        labor_detail["role"].isin(selected_roles)
-    ].copy()
-
-    available_employees = sorted(
-        labor_detail["employee"].dropna().unique(),
-        key=str.lower,
-    )
-    keep_multiselect(
-        "splh_drive_thru_employees",
-        available_employees,
-    )
-    selected_employees = st.sidebar.multiselect(
-        "Employees",
-        options=available_employees,
-        key="splh_drive_thru_employees",
-        placeholder="Select employees",
-        help=(
-            "Labor hours and the employee names use these "
-            "people. Sales and drive-thru times stay for the "
-            "whole selection."
-        ),
-    )
-    if not selected_employees:
-        st.info("Select at least one employee.")
-        st.stop()
-    labor_detail = labor_detail[
-        labor_detail["employee"].isin(selected_employees)
-    ].copy()
-    combined = replace_labor_hours(combined, labor_detail)
 
 st.sidebar.header("Color breaks")
 GREEN_SPLH = float(

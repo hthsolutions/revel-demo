@@ -9,11 +9,16 @@ st.set_page_config(
 
 navigation = st.navigation(
     [
+        st.Page(
+            "views/summary.py",
+            title="Summary",
+            icon="🏪",
+            default=True,
+        ),
         # st.Page(
         #     "views/week_over_week.py",
         #     title="Sales: Week Over Week",
         #     icon="📈",
-        #     default=True,
         # ),
         st.Page(
             "views/sales_growth.py",
@@ -50,11 +55,11 @@ navigation = st.navigation(
             title="Combo Mix",
             icon="🍗",
         ),
-        st.Page(
-            "views/cash_variance.py",
-            title="Cash Variance",
-            icon="💰",
-        ),
+        # st.Page(
+        #     "views/cash_variance.py",
+        #     title="Cash Variance",
+        #     icon="💰",
+        # ),
         st.Page(
             "views/discount_reason.py",
             title="Discount Reason",

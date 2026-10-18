@@ -27,6 +27,7 @@ HME_TABLE = "daily-hme-rcd-summary"
 CASH_SUMMARY_TABLE = "daily-revel-cash-summary"
 DISCOUNT_REASON_TABLE = "daily-revel-discount-reason"
 WASTE_LOG_TABLE = "waste_log_history"
+GOOGLE_REVIEWS_TABLE = "google_reviews"
 
 # HME departure timestamps are store-local. A visit before
 # 6:00 AM belongs to the previous business date, matching
@@ -240,6 +241,65 @@ def load_sales_data() -> pd.DataFrame:
     )
 
     return dataframe.sort_values("business_date")
+
+
+@st.cache_data(ttl=300)
+def load_google_reviews() -> pd.DataFrame:
+    """One row per Google review.
+
+    reviewed_at_date is stored at midnight UTC, so the
+    business date is that UTC calendar date. city is the
+    store name and lines up with the sales location.
+    """
+
+    empty = pd.DataFrame(
+        columns=[
+            "review_id",
+            "location",
+            "location_key",
+            "business_date",
+            "rating",
+        ]
+    )
+    dataframe = fetch_table(
+        GOOGLE_REVIEWS_TABLE,
+        ["review_id", "city", "rating", "reviewed_at_date"],
+        "reviewed_at_date",
+    )
+    if dataframe.empty:
+        return empty
+
+    dataframe["location"] = (
+        dataframe["city"].fillna("").astype(str).str.strip()
+    )
+    dataframe = dataframe.loc[dataframe["location"] != ""].copy()
+    if dataframe.empty:
+        return empty
+
+    reviewed = pd.to_datetime(
+        dataframe["reviewed_at_date"],
+        errors="coerce",
+        utc=True,
+    )
+    dataframe["business_date"] = (
+        reviewed.dt.tz_localize(None).dt.normalize()
+    )
+    dataframe = _coerce_numeric(dataframe, ["rating"])
+    dataframe = _add_location_key(dataframe)
+    dataframe = dataframe.dropna(subset=["business_date"])
+    dataframe = dataframe.drop_duplicates(
+        subset=["review_id"],
+        keep="last",
+    )
+    return dataframe[
+        [
+            "review_id",
+            "location",
+            "location_key",
+            "business_date",
+            "rating",
+        ]
+    ].sort_values("business_date")
 
 
 def _parse_raw_record(value) -> dict:

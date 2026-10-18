@@ -4,7 +4,6 @@ import streamlit as st
 
 from revel_data import (
     DRIVE_THRU_TIME_COLUMNS,
-    WEEK_START_OPTIONS,
     MissingSecretError,
     load_google_reviews,
     load_hme_departures,
@@ -683,12 +682,17 @@ def summary_column_config() -> dict:
         "week_net_sales": st.column_config.NumberColumn(
             "Net sales (week)",
             format="$%,.0f",
-            help="Net sales for the week that contains that date.",
+            help=(
+                "Net sales for the 7 days ending on "
+                "the selected date."
+            ),
         ),
         "annualized": st.column_config.NumberColumn(
             "Annualized",
             format="$%,.0f",
-            help="That week's net sales multiplied by 52.",
+            help=(
+                "Net sales for those 7 days, multiplied by 52."
+            ),
         ),
         "day_labor_percent": st.column_config.NumberColumn(
             "Labor % (day)",
@@ -698,7 +702,9 @@ def summary_column_config() -> dict:
         "week_labor_percent": st.column_config.NumberColumn(
             "Labor % (week)",
             format="%.1f%%",
-            help="Shift wages divided by that week's net sales.",
+            help=(
+                "Shift wages divided by net sales for those 7 days."
+            ),
         ),
         "day_splh": st.column_config.NumberColumn(
             "SpLH (day)",
@@ -713,9 +719,9 @@ def summary_column_config() -> dict:
             "SpLH (week)",
             format="$%,.2f",
             help=(
-                "That week's net sales divided by hourly labor "
-                "hours. Salaried roles, including GM, are left "
-                "out of the hours."
+                "Net sales for those 7 days divided by hourly "
+                "labor hours. Salaried roles, including GM, "
+                "are left out of the hours."
             ),
         ),
         "day_lane": st.column_config.TextColumn(
@@ -724,7 +730,9 @@ def summary_column_config() -> dict:
         ),
         "week_lane": st.column_config.TextColumn(
             "Drive-thru (week)",
-            help="Car-weighted average lane time that week.",
+            help=(
+                "Car-weighted average lane time over those 7 days."
+            ),
         ),
         "day_ot_hours": st.column_config.NumberColumn(
             "OT hours (day)",
@@ -734,7 +742,10 @@ def summary_column_config() -> dict:
         "week_ot_hours": st.column_config.NumberColumn(
             "OT hours (week)",
             format="%.1f",
-            help="Overtime hours that week. The GM role is left out.",
+            help=(
+                "Overtime hours over those 7 days. "
+                "The GM role is left out."
+            ),
         ),
         "day_review_count": st.column_config.NumberColumn(
             "Reviews (day)",
@@ -752,12 +763,15 @@ def summary_column_config() -> dict:
         "week_review_count": st.column_config.NumberColumn(
             "Reviews (week)",
             format="%.0f",
-            help="Google reviews posted during that week.",
+            help="Google reviews posted during those 7 days.",
         ),
         "week_review_score": st.column_config.NumberColumn(
             "Avg score (week)",
             format="%.2f",
-            help="Average star rating of the reviews posted that week.",
+            help=(
+                "Average star rating of the reviews "
+                "posted during those 7 days."
+            ),
         ),
         "current_review_score": st.column_config.NumberColumn(
             "Current score",
@@ -790,7 +804,7 @@ def available_dates(*frames: pd.DataFrame) -> pd.Series:
 st.title("Summary")
 st.caption(
     "Every store in Supabase, for the selected day and the "
-    "week that contains it. A new store shows up here as "
+    "7 days ending on that date. A new store shows up here as "
     "soon as it has sales, shifts, drive-thru cars, or "
     "Google reviews."
 )
@@ -903,25 +917,19 @@ business_date = st.sidebar.date_input(
     key=date_key,
     help=(
         "Day columns use this business date. Week columns "
-        "and the pie use the week that contains it."
+        "and the pie use the 7 days ending on it."
     ),
-)
-week_start_name = st.sidebar.selectbox(
-    "Week starts on",
-    options=list(WEEK_START_OPTIONS.keys()),
-    key="summary_week_start",
-    help="The seven days that count as this store's week.",
 )
 if business_date is None:
     st.warning("Pick a business date.")
     st.stop()
 
-week_start_weekday = WEEK_START_OPTIONS[week_start_name]
 day = pd.Timestamp(business_date).normalize()
-day_index = (int(day.weekday()) - week_start_weekday) % 7
-week_start = day - pd.Timedelta(days=day_index)
-week_end = week_start + pd.Timedelta(days=6)
-st.sidebar.caption(f"Week of {format_week_range(week_start, week_end)}.")
+week_end = day
+week_start = day - pd.Timedelta(days=6)
+st.sidebar.caption(
+    f"Trailing 7 days: {format_week_range(week_start, week_end)}."
+)
 
 day_metrics = store_window(
     stores,
@@ -968,7 +976,7 @@ if pie is None:
 else:
     st.altair_chart(pie, use_container_width=False)
     st.caption(
-        "Each slice is one store's net sales for the week. "
+        "Each slice is one store's net sales for these 7 days. "
         "The percentage is drawn on the slice, and again "
         "beside the store name. A slice under "
         f"{SLICE_LABEL_MIN_SHARE * 100:.1f}% keeps the "
@@ -996,7 +1004,7 @@ display_columns = [
 ]
 st.subheader(
     f"{day:%A, %b %d, %Y}  ·  "
-    f"Week of {format_week_range(week_start, week_end)}"
+    f"Trailing 7 days, {format_week_range(week_start, week_end)}"
 )
 st.dataframe(
     comparison[display_columns],
@@ -1006,26 +1014,18 @@ st.dataframe(
     height=table_height(len(comparison)),
 )
 
-if week_end.date() > max_date:
+week_sales = in_window(sales_daily, week_start, week_end)
+recorded_days = (
+    int(week_sales["business_date"].nunique())
+    if not week_sales.empty
+    else 0
+)
+if recorded_days < 7:
     st.caption(
-        f"This week is still in progress. Figures include "
-        f"data through {max_date:%b %d, %Y}. Annualized net "
-        "sales is the net sales recorded so far, multiplied "
-        "by 52."
+        f"Sales are recorded on {recorded_days} of 7 days "
+        "in this window. Annualized net sales is the net "
+        "sales from these 7 days, multiplied by 52."
     )
-else:
-    week_sales = in_window(sales_daily, week_start, week_end)
-    recorded_days = (
-        int(week_sales["business_date"].nunique())
-        if not week_sales.empty
-        else 0
-    )
-    if recorded_days < 7:
-        st.caption(
-            f"Sales are recorded on {recorded_days} of 7 days "
-            "in this week. Annualized net sales is that "
-            "week's net sales multiplied by 52."
-        )
 
 st.caption(
     "Hourly labor % is shift wages divided by net sales. "
@@ -1033,8 +1033,9 @@ st.caption(
     "salaried roles such as GM left out of the hours. "
     "Drive-thru time is the car-weighted average lane time. "
     "OT hours leave out the GM role. Review counts are "
-    "Google reviews posted that day or week, and the "
-    "average score is the average of those star ratings. "
+    "Google reviews posted that day or during those 7 days, "
+    "and the average score is the average of those star "
+    "ratings. "
     "Current score is the average of every review stored "
     "for the store. All stores adds the stores together, "
     "then divides."

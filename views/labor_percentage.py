@@ -1682,6 +1682,21 @@ else:
                 "role",
                 "labor_dollars",
             )
+            # Stack each period by that period's labor dollars.
+            # A role's total across the selection can rank it
+            # differently from one period.
+            role_df = role_df.sort_values(
+                ["period_index", "labor_dollars", "role"],
+                ascending=[True, False, True],
+            )
+            role_df["labor_top"] = (
+                role_df
+                .groupby("period_index", sort=False)["labor_dollars"]
+                .cumsum()
+            )
+            role_df["labor_base"] = (
+                role_df["labor_top"] - role_df["labor_dollars"]
+            )
             period_label_order = rate_df["period_label"].tolist()
             label_angle = -40 if duration > 6 else 0
 
@@ -1700,15 +1715,12 @@ else:
                         ),
                     ),
                     y=alt.Y(
-                        "labor_dollars:Q",
+                        "labor_base:Q",
                         title="Labor Dollars",
-                        stack="zero",
+                        stack=None,
                         axis=alt.Axis(format="$,.0f"),
                     ),
-                    order=alt.Order(
-                        "stack_rank:Q",
-                        sort="ascending",
-                    ),
+                    y2=alt.Y2("labor_top:Q"),
                     color=alt.Color(
                         "role:N",
                         title="Role",
@@ -1746,8 +1758,9 @@ else:
                 "above. Role totals cover every day with a labor "
                 "record in that period, including days the sales "
                 "feed has not reported, so they can exceed the "
-                "labor totals above. The largest role sits at "
-                "the bottom of each bar."
+                "labor totals above. Within each bar, roles are "
+                "ordered by that period's labor dollars, largest "
+                "at the bottom."
             )
 
 

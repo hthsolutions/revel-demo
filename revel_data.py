@@ -30,9 +30,16 @@ DISCOUNT_REASON_TABLE = "daily-revel-discount-reason"
 WASTE_LOG_TABLE = "waste_log_history"
 GOOGLE_REVIEWS_TABLE = "google_reviews"
 
-# HME departure timestamps are store-local. A visit before
-# 6:00 AM belongs to the previous business date, matching
-# the hourly sales extract.
+# One row per store per day. The line detail is JSON.
+COMBO_MIX_DAILY_VIEW = "daily-combo-mix-by-store-day"
+SHIFT_DAILY_VIEW = "daily-shift-summary-by-store-day"
+HOURLY_SALES_DAILY_VIEW = "daily-hourly-sales-by-store-day"
+HME_DAILY_VIEW = "daily-hme-by-store-day"
+WASTE_LOG_DAILY_VIEW = "daily-waste-log-by-store-day"
+
+# HME departure timestamps are store-local. A loaded row
+# keeps the calendar date of Departure_Time. Charts still
+# treat BUSINESS_DAY_START_HOUR as the start of the day.
 STORE_TIMEZONE = ZoneInfo("America/Chicago")
 BUSINESS_DAY_START_HOUR = 6
 
@@ -191,6 +198,51 @@ def fetch_table(
         page_start += PAGE_SIZE
 
     return pd.DataFrame(records)
+
+
+def _detail_lines(value) -> list[dict]:
+    """JSON lines stored on one store-day, ignoring blanks."""
+
+    if value is None:
+        return []
+    if isinstance(value, str):
+        if value.strip() == "":
+            return []
+        value = json.loads(value)
+    if not isinstance(value, list):
+        return []
+    return [line for line in value if isinstance(line, dict)]
+
+
+def expand_daily_detail(
+    view_name: str,
+    detail_column: str,
+) -> pd.DataFrame:
+    """Read a store-day view and return one row per detail line.
+
+    location and business_date come from the parent row, so
+    they stay correct even when the JSON does not repeat them.
+    """
+
+    frame = fetch_table(
+        view_name,
+        ["location", "business_date", detail_column],
+        "business_date",
+    )
+    if frame.empty or detail_column not in frame.columns:
+        return pd.DataFrame()
+
+    rows: list[dict] = []
+    for record in frame.to_dict(orient="records"):
+        for detail in _detail_lines(record.get(detail_column)):
+            line = dict(detail)
+            line["location"] = record.get("location")
+            line["business_date"] = record.get("business_date")
+            rows.append(line)
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
 
 
 def _coerce_numeric(
@@ -435,21 +487,13 @@ def load_shift_data() -> pd.DataFrame:
     that total and are safe to sum on their own.
     """
 
-    dataframe = fetch_table(
-        SHIFT_TABLE,
-        [
-            "record_key",
-            "date",
-            "location",
-            "employee",
-            "role",
-            *SHIFT_NUMERIC_COLUMNS,
-        ],
-        "date",
-    )
+    dataframe = expand_daily_detail(SHIFT_DAILY_VIEW, "shifts")
 
     if dataframe.empty:
         return dataframe
+
+    if "date" not in dataframe.columns:
+        dataframe["date"] = dataframe["business_date"]
 
     dataframe["business_date"] = pd.to_datetime(
         dataframe["date"],
@@ -476,7 +520,20 @@ def load_shift_data() -> pd.DataFrame:
         dataframe[SHIFT_NUMERIC_COLUMNS].fillna(0.0)
     )
 
-    return dataframe.sort_values("business_date")
+    dataframe = dataframe.sort_values("business_date")
+    kept = [
+        "record_key",
+        "date",
+        "location",
+        "employee",
+        "role",
+        *SHIFT_NUMERIC_COLUMNS,
+        "business_date",
+        "location_key",
+    ]
+    return dataframe[
+        [column for column in kept if column in dataframe.columns]
+    ]
 
 
 # Clock columns seen on Revel time-worked extracts. The
@@ -568,26 +625,18 @@ def load_shift_clocks() -> pd.DataFrame:
     empty = pd.DataFrame(
         columns=["record_key", "clock_in", "clock_out"]
     )
-    columns = get_shift_columns()
-    pair = resolve_clock_columns(columns)
-    if pair is None:
+    clocks = expand_daily_detail(SHIFT_DAILY_VIEW, "shifts")
+    if clocks.empty or "record_key" not in clocks.columns:
         return empty
-
-    clock_in, clock_out = pair
-    clocks = fetch_table(
-        SHIFT_TABLE,
-        ["record_key", clock_in, clock_out],
-        "date",
-    )
-    if clocks.empty:
+    if "shift_start" not in clocks.columns or "shift_end" not in clocks.columns:
         return empty
 
     return clocks.rename(
         columns={
-            clock_in: "clock_in",
-            clock_out: "clock_out",
+            "shift_start": "clock_in",
+            "shift_end": "clock_out",
         }
-    )
+    )[["record_key", "clock_in", "clock_out"]]
 
 
 HOURLY_SALES_COLUMNS = [
@@ -616,31 +665,13 @@ def load_hourly_sales() -> pd.DataFrame:
     labels a business day from 6:00 AM through 5:59 AM.
     """
 
-    available = get_table_columns(HOURLY_SALES_TABLE)
-    selected = [
-        column_name
-        for column_name in (
-            _pick_column(available, [candidate])
-            for candidate in HOURLY_SALES_COLUMNS
-        )
-        if column_name is not None
-    ]
-    order_column = _pick_column(
-        available,
-        ["business_date", "extracted_at", "id"],
-    )
-
-    if not selected or order_column is None:
-        return pd.DataFrame(columns=HOURLY_SALES_COLUMNS)
-
-    dataframe = fetch_table(
-        HOURLY_SALES_TABLE,
-        selected,
-        order_column,
+    dataframe = expand_daily_detail(
+        HOURLY_SALES_DAILY_VIEW,
+        "intervals",
     )
 
     if dataframe.empty:
-        return dataframe
+        return pd.DataFrame(columns=HOURLY_SALES_COLUMNS)
 
     rename = {}
     for candidate in HOURLY_SALES_COLUMNS:
@@ -656,11 +687,11 @@ def load_hourly_sales() -> pd.DataFrame:
         if column_name not in dataframe.columns
     ]
     if missing:
-        found = ", ".join(available) or "none"
+        found = ", ".join(dataframe.columns) or "none"
         raise ValueError(
-            "revel_hourly_sales is missing "
+            f"{HOURLY_SALES_DAILY_VIEW} is missing "
             + ", ".join(missing)
-            + f". Columns on the table: {found}."
+            + f". Columns on the view: {found}."
         )
 
     dataframe["business_date"] = (
@@ -701,9 +732,13 @@ def load_hourly_sales() -> pd.DataFrame:
             keep="last",
         )
 
-    return dataframe.sort_values(
+    dataframe = dataframe.sort_values(
         ["business_date", "location", "time"]
     )
+    kept = [*HOURLY_SALES_COLUMNS, "location_key"]
+    return dataframe[
+        [column for column in kept if column in dataframe.columns]
+    ]
 
 
 # Canonical names for the HME car-departure feed. The source
@@ -848,35 +883,20 @@ def load_hme_departures() -> pd.DataFrame:
     behind that departure, not a daily car count.
     """
 
-    available = get_table_columns(HME_TABLE)
-    selected: list[str] = []
-    rename: dict[str, str] = {}
-    for canonical, candidates in HME_FIELDS.items():
-        actual = _pick_hme_column(available, candidates)
-        if actual is None or actual in selected:
-            continue
-        selected.append(actual)
-        rename[actual] = canonical
-
-    required = {"location", "departure_time", "lane_total"}
-    missing = sorted(required - set(rename.values()))
-    if missing or not selected:
-        found = ", ".join(available) or "none"
-        raise ValueError(
-            f"{HME_TABLE} is missing "
-            + ", ".join(missing or ["departure_time"])
-            + f". Columns on the table: {found}."
-        )
-
-    order_column = _pick_hme_column(
-        available,
-        HME_FIELDS["departure_time"],
-    )
-    dataframe = fetch_table(HME_TABLE, selected, order_column)
+    dataframe = expand_daily_detail(HME_DAILY_VIEW, "departures")
     if dataframe.empty:
         return dataframe
 
-    dataframe = dataframe.rename(columns=rename)
+    required = {"location", "departure_time", "lane_total", "business_date"}
+    missing = sorted(required - set(dataframe.columns))
+    if missing:
+        found = ", ".join(dataframe.columns) or "none"
+        raise ValueError(
+            f"{HME_DAILY_VIEW} is missing "
+            + ", ".join(missing)
+            + f". Columns on the view: {found}."
+        )
+
     for column_name in ("event_name", "total_cars", *DRIVE_THRU_TIME_COLUMNS):
         if column_name not in dataframe.columns:
             dataframe[column_name] = pd.NA
@@ -906,7 +926,11 @@ def load_hme_departures() -> pd.DataFrame:
             dataframe = departures.copy()
 
     dataframe = _add_location_key(dataframe)
-    dataframe = assign_business_clock(dataframe)
+    dataframe["business_date"] = pd.to_datetime(
+        dataframe["business_date"],
+        errors="coerce",
+    ).dt.normalize()
+    dataframe["hour"] = dataframe["departure_time"].dt.hour.astype("Int64")
     dataframe = dataframe.drop_duplicates(
         subset=["location_key", "departure_time"],
         keep="last",
@@ -937,88 +961,17 @@ def load_shift_summary() -> pd.DataFrame:
             "hours",
         ]
     )
-    available = get_table_columns(SHIFT_SUMMARY_TABLE)
-    if not available:
-        return empty
-
-    date_column = _pick_column(
-        available,
-        ["business_date", "date", "shift_date"],
-    )
-    location_column = _pick_column(
-        available,
-        ["location", "establishment", "store"],
-    )
-    role_column = _pick_column(
-        available,
-        ["role", "job_title", "position"],
-    )
-    employee_column = _pick_column(
-        available,
-        ["employee", "employee_name", "name"],
-    )
-    hours_column = _pick_column(
-        available,
-        ["hours", "total_hours", "labor_hours", "worked_hours"],
-    )
-    regular_hours_column = None
-    ot_hours_column = None
-    if hours_column is None:
-        regular_hours_column = _pick_column(
-            available,
-            ["regular_hours"],
-        )
-        ot_hours_column = _pick_column(
-            available,
-            ["ot_hours"],
-        )
-    clock_pair = _resolve_clock_pair(available)
-    order_column = date_column or _pick_column(
-        available,
-        ["id", "record_key"],
-    ) or available[0]
-
-    selected = []
-    for column_name in (
-        date_column,
-        location_column,
-        role_column,
-        employee_column,
-        hours_column,
-        regular_hours_column,
-        ot_hours_column,
-        *(clock_pair or ()),
-    ):
-        if column_name and column_name not in selected:
-            selected.append(column_name)
-
-    dataframe = fetch_table(
-        SHIFT_SUMMARY_TABLE,
-        selected,
-        order_column,
-    )
+    dataframe = expand_daily_detail(SHIFT_DAILY_VIEW, "shifts")
     if dataframe.empty:
         return empty
 
-    rename = {}
-    if date_column:
-        rename[date_column] = "shift_date"
-    if location_column:
-        rename[location_column] = "location"
-    if role_column:
-        rename[role_column] = "role"
-    if employee_column:
-        rename[employee_column] = "employee"
-    if hours_column:
-        rename[hours_column] = "hours"
-    if regular_hours_column:
-        rename[regular_hours_column] = "regular_hours"
-    if ot_hours_column:
-        rename[ot_hours_column] = "ot_hours"
-    if clock_pair:
-        rename[clock_pair[0]] = "clock_in"
-        rename[clock_pair[1]] = "clock_out"
-    dataframe = dataframe.rename(columns=rename)
+    dataframe = dataframe.rename(
+        columns={
+            "business_date": "shift_date",
+            "shift_start": "clock_in",
+            "shift_end": "clock_out",
+        }
+    )
 
     for column_name in ("role", "employee", "clock_in", "clock_out"):
         if column_name not in dataframe.columns:
@@ -1073,8 +1026,19 @@ def load_shift_summary() -> pd.DataFrame:
         dataframe["employee"].fillna("Unknown").astype(str)
     )
     dataframe = _add_location_key(dataframe)
-
-    return dataframe
+    kept = [
+        "location",
+        "location_key",
+        "role",
+        "employee",
+        "shift_date",
+        "clock_in",
+        "clock_out",
+        "hours",
+    ]
+    return dataframe[
+        [column for column in kept if column in dataframe.columns]
+    ]
 
 
 @st.cache_data(ttl=300)
@@ -1292,21 +1256,9 @@ def load_combo_mix() -> pd.DataFrame:
     combo net sales for that selection.
     """
 
-    available = get_table_columns(COMBO_MIX_TABLE)
-    selected = [
-        column_name
-        for column_name in (
-            _pick_column(available, [candidate])
-            for candidate in COMBO_MIX_COLUMNS
-        )
-        if column_name is not None
-    ]
-    order_column = _pick_column(
-        available,
-        ["business_date", "id"],
-    )
+    dataframe = expand_daily_detail(COMBO_MIX_DAILY_VIEW, "products")
 
-    if not selected or order_column is None:
+    if dataframe.empty:
         return pd.DataFrame(
             columns=[
                 *COMBO_MIX_COLUMNS,
@@ -1315,15 +1267,6 @@ def load_combo_mix() -> pd.DataFrame:
                 "location_key",
             ]
         )
-
-    dataframe = fetch_table(
-        COMBO_MIX_TABLE,
-        selected,
-        order_column,
-    )
-
-    if dataframe.empty:
-        return dataframe
 
     rename = {}
     for candidate in COMBO_MIX_COLUMNS:
@@ -1345,11 +1288,11 @@ def load_combo_mix() -> pd.DataFrame:
         if column_name not in dataframe.columns
     ]
     if missing:
-        found = ", ".join(available) or "none"
+        found = ", ".join(dataframe.columns) or "none"
         raise ValueError(
-            f"{COMBO_MIX_TABLE} is missing "
+            f"{COMBO_MIX_DAILY_VIEW} is missing "
             + ", ".join(missing)
-            + f". Columns on the table: {found}."
+            + f". Columns on the view: {found}."
         )
 
     dataframe["business_date"] = (
@@ -1398,9 +1341,18 @@ def load_combo_mix() -> pd.DataFrame:
     ]
     dataframe = dataframe.drop_duplicates(subset=grain, keep="last")
 
-    return dataframe.sort_values(
+    dataframe = dataframe.sort_values(
         ["business_date", "location", "product_class", "product_name"]
     )
+    kept = [
+        *COMBO_MIX_COLUMNS,
+        "net_sales",
+        "discounts",
+        "location_key",
+    ]
+    return dataframe[
+        [column for column in kept if column in dataframe.columns]
+    ]
 
 
 CASH_SUMMARY_NUMERIC_COLUMNS = [
@@ -1668,30 +1620,13 @@ def waste_category(item) -> str | None:
 def load_waste_log() -> pd.DataFrame:
     """Chicken and fries waste dollars from the waste log."""
 
-    columns = get_table_columns(WASTE_LOG_TABLE)
-    if not columns:
-        return pd.DataFrame()
-
-    selected = [
-        column
-        for column in WASTE_LOG_COLUMNS
-        if column in columns
-    ]
-    if not {"waste_date", "location", "item", "total"} <= set(selected):
-        return pd.DataFrame()
-
-    order_column = (
-        "waste_date" if "waste_date" in columns else selected[0]
-    )
-    dataframe = fetch_table(
-        WASTE_LOG_TABLE,
-        selected,
-        order_column,
-    )
+    dataframe = expand_daily_detail(WASTE_LOG_DAILY_VIEW, "lines")
     if dataframe.empty:
         return dataframe
 
-    dataframe = dataframe.rename(columns={"waste_date": "business_date"})
+    required = {"business_date", "location", "item", "total"}
+    if not required <= set(dataframe.columns):
+        return pd.DataFrame()
     dataframe["business_date"] = pd.to_datetime(
         dataframe["business_date"],
         errors="coerce",
@@ -1706,6 +1641,20 @@ def load_waste_log() -> pd.DataFrame:
     dataframe["category"] = dataframe["item"].map(waste_category)
     dataframe = dataframe[dataframe["category"].notna()].copy()
     dataframe = _add_location_key(dataframe)
-    return dataframe.sort_values(
+    dataframe = dataframe.sort_values(
         ["business_date", "location", "category"]
-    ).reset_index(drop=True)
+    )
+    kept = [
+        "business_date",
+        "location",
+        "location_key",
+        "item",
+        "uom",
+        "qty",
+        "each_amount",
+        "total",
+        "category",
+    ]
+    return dataframe[
+        [column for column in kept if column in dataframe.columns]
+    ].reset_index(drop=True)

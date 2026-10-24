@@ -5,6 +5,7 @@ cleaning, and week definitions stay consistent.
 """
 
 import json
+import os
 
 import pandas as pd
 import streamlit as st
@@ -114,22 +115,47 @@ class MissingSecretError(RuntimeError):
     """Raised when Supabase credentials are not configured."""
 
 
-@st.cache_resource
-def get_supabase_client() -> Client:
-    """Create and reuse one Supabase client."""
+def _read_credential(name: str) -> str:
+    """Read one Supabase setting from the environment or Streamlit secrets.
+
+    Render injects SUPABASE_URL and SUPABASE_KEY as environment
+    variables. Streamlit Community Cloud stores the same names in
+    secrets.toml, which st.secrets reads. Environment variables win
+    when both are present, and st.secrets is only opened when the
+    variable is missing so a Render deploy does not warn about a
+    secrets file it does not have.
+    """
+
+    from_environment = os.environ.get(name, "").strip()
+    if from_environment:
+        return from_environment
 
     # Streamlit raises different errors depending on whether
     # the secrets file is missing or just incomplete, and the
     # fix is the same either way.
     try:
-        supabase_url = st.secrets["SUPABASE_URL"]
-        supabase_key = st.secrets["SUPABASE_KEY"]
+        from_secrets = str(st.secrets[name]).strip()
     except Exception as error:
         raise MissingSecretError(
-            "Add SUPABASE_URL and SUPABASE_KEY in your "
-            "Streamlit app settings."
+            "Add SUPABASE_URL and SUPABASE_KEY as environment "
+            "variables, or in your Streamlit app settings."
         ) from error
 
+    if not from_secrets:
+        raise MissingSecretError(
+            "Add SUPABASE_URL and SUPABASE_KEY as environment "
+            "variables, or in your Streamlit app settings."
+        )
+
+    return from_secrets
+
+
+@st.cache_resource
+def get_supabase_client() -> Client:
+    """Create and reuse one Supabase client."""
+
+    supabase_url = _read_credential("SUPABASE_URL")
+    supabase_key = _read_credential("SUPABASE_KEY")
     return create_client(supabase_url, supabase_key)
 
 

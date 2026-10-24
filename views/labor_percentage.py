@@ -1559,16 +1559,18 @@ else:
 
 
 # ---------------------------------------------------------
-# Labor dollars by role
+# Hourly labor dollars by role
 # ---------------------------------------------------------
 
-st.subheader("Labor Dollars by Role")
+st.subheader("Hourly Labor Dollars by role")
 
 role_frames = []
 role_window_ready = date_end is not None and not rate_df.empty
 
 if not role_window_ready:
-    st.info("Pick a date end to see labor dollars by role.")
+    st.info(
+        "Pick a date end to see hourly labor dollars by role."
+    )
 else:
     if not shift_df.empty:
         hourly_roles_df = shift_df.copy()
@@ -1586,8 +1588,8 @@ else:
         )
 
         if not hourly_roles_df.empty:
-            # GM and DM are paid from the salary feed. Shift
-            # rows for those roles are zero-dollar duplicates.
+            # Salaried roles are paid from the salary feed.
+            # Shift rows for those roles are left out here.
             salaried_roles = salaried_role_keys(salary_df)
             shift_role_key = (
                 hourly_roles_df["role"]
@@ -1613,42 +1615,10 @@ else:
                 .agg(labor_dollars=("shift_wages", "sum"))
             )
 
-    if not salary_df.empty:
-        salary_roles_df = salary_df.copy()
-
-        # The salary table stores names in upper case, so it is
-        # matched on the shared location key.
-        if selected_location != "All Locations":
-            selected_key = selected_location.upper()
-            salary_roles_df = salary_roles_df[
-                salary_roles_df["location_key"] == selected_key
-            ]
-
-        salary_roles_df = rows_in_periods(
-            salary_roles_df,
-            date_end,
-            period_days,
-            duration,
-        )
-
-        if not salary_roles_df.empty:
-            salary_roles_df = (
-                salary_roles_df
-                .groupby(
-                    ["period_index", "role"],
-                    as_index=False,
-                )
-                .agg(labor_dollars=("daily_salary", "sum"))
-            )
-            salary_roles_df["role"] = (
-                salary_roles_df["role"].astype(str).str.strip()
-            )
-            role_frames.append(salary_roles_df)
-
     if not role_frames:
         st.info(
-            "No role-level labor records fall inside the "
-            "selected date range."
+            "No hourly labor records by role fall inside "
+            "the selected date range."
         )
     else:
         role_df = (
@@ -1660,8 +1630,8 @@ else:
 
         if role_df.empty:
             st.info(
-                "No role-level labor records fall inside the "
-                "selected date range."
+                "No hourly labor records by role fall inside "
+                "the selected date range."
             )
         else:
             period_labels = rate_df[
@@ -1716,7 +1686,7 @@ else:
                     ),
                     y=alt.Y(
                         "labor_base:Q",
-                        title="Labor Dollars",
+                        title="Hourly Labor Dollars",
                         stack=None,
                         axis=alt.Axis(format="$,.0f"),
                     ),
@@ -1740,7 +1710,7 @@ else:
                         alt.Tooltip("role:N", title="Role"),
                         alt.Tooltip(
                             "labor_dollars:Q",
-                            title="Labor Dollars",
+                            title="Hourly Labor Dollars",
                             format="$,.0f",
                         ),
                     ],
@@ -1755,10 +1725,12 @@ else:
 
             st.caption(
                 "Each bar uses the same periods as the chart "
-                "above. Role totals cover every day with a labor "
-                "record in that period, including days the sales "
-                "feed has not reported, so they can exceed the "
-                "labor totals above. Within each bar, roles are "
+                "above. Bars are hourly shift wages by role, "
+                "and salaried roles are left out. Totals cover "
+                "every day with an hourly labor record in that "
+                "period, including days the sales feed has not "
+                "reported, so they can exceed the hourly labor "
+                "totals above. Within each bar, roles are "
                 "ordered by that period's labor dollars, largest "
                 "at the bottom."
             )
@@ -1814,6 +1786,21 @@ else:
             on=["business_date", "location_key", "period_index"],
             how="inner",
         )
+
+        if not ot_role_source.empty:
+            # Salaried roles are paid from the salary feed
+            # and are left out of overtime dollars and hours.
+            salaried_roles = salaried_role_keys(salary_df)
+            ot_role_key = (
+                ot_role_source["role"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.upper()
+            )
+            ot_role_source = ot_role_source.loc[
+                ~ot_role_key.isin(salaried_roles)
+            ].copy()
 
         if not ot_role_source.empty:
             ot_role_df = (
@@ -1878,15 +1865,21 @@ else:
     else:
         ot_role_order = []
 
-    ot_by_period = (
-        labor_period_days
-        .groupby("period_index", as_index=False)
-        .agg(ot_labor=("ot_labor", "sum"))
-        if not labor_period_days.empty
-        else pd.DataFrame(
-            columns=["period_index", "ot_labor"]
+    # The line uses the same hourly roles as the bars, so
+    # salaried overtime is left out of both dollars and hours.
+    if not ot_role_df.empty:
+        ot_by_period = (
+            ot_role_df
+            .groupby("period_index", as_index=False)
+            .agg(
+                ot_labor=("ot_labor", "sum"),
+                ot_hours=("ot_hours", "sum"),
+            )
         )
-    )
+    else:
+        ot_by_period = pd.DataFrame(
+            columns=["period_index", "ot_labor", "ot_hours"]
+        )
 
     ot_percent_df = period_labels[
         [
@@ -1897,32 +1890,6 @@ else:
         ]
     ].merge(
         ot_by_period,
-        on="period_index",
-        how="left",
-    )
-
-    # Total OT hours on this chart leave out the GM role.
-    # Overtime dollars stay as recorded, including GM.
-    if not ot_role_df.empty:
-        non_gm_ot_hours = (
-            ot_role_df.loc[
-                ot_role_df["role"]
-                .astype(str)
-                .str.strip()
-                .str.upper()
-                != "GM",
-                ["period_index", "ot_hours"],
-            ]
-            .groupby("period_index", as_index=False)["ot_hours"]
-            .sum()
-        )
-    else:
-        non_gm_ot_hours = pd.DataFrame(
-            columns=["period_index", "ot_hours"]
-        )
-
-    ot_percent_df = ot_percent_df.merge(
-        non_gm_ot_hours,
         on="period_index",
         how="left",
     )
@@ -2103,8 +2070,8 @@ else:
         "overtime amount sits at the bottom. Hover a segment "
         "for that role's overtime hours and overtime pay. "
         "The right axis is overtime pay "
-        "as a percent of total labor. Total OT hours on the "
-        "line exclude the GM role."
+        "as a percent of total labor. Overtime dollars and "
+        "hours leave out salaried roles."
     )
 
 

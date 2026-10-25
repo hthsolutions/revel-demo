@@ -3,18 +3,61 @@ import pandas as pd
 import streamlit as st
 
 from revel_data import (
-    WEEK_START_OPTIONS,
     WEEKDAY_NAMES,
     MissingSecretError,
-    add_week_columns,
     escape_dollar_signs,
     format_metric_value,
     load_combo_mix,
     load_sales_data,
     location_filter_controls,
     percent_change,
-    reindex_weekly,
 )
+
+
+# Fixed-length buckets counted backward from Date end.
+# A month is 30 days so every month is the same length,
+# matching Sales Growth and Labor %.
+INTERVALS = {
+    "Daily": {
+        "days": 1,
+        "max_duration": 60,
+        "default_duration": 30,
+        "unit": "days",
+        "x_title": "Business date",
+        "duration_label": "Duration (days)",
+        "growth_title": "Day-over-day growth",
+        "row_name": "day",
+        "series_name": "daily",
+        "comparison": "the previous day",
+        "prior_column": "Vs prior day",
+    },
+    "Weekly": {
+        "days": 7,
+        "max_duration": 52,
+        "default_duration": 8,
+        "unit": "weeks",
+        "x_title": "Week",
+        "duration_label": "Duration (weeks)",
+        "growth_title": "Week-over-week growth",
+        "row_name": "week",
+        "series_name": "weekly",
+        "comparison": "the previous week",
+        "prior_column": "Vs prior week",
+    },
+    "Monthly": {
+        "days": 30,
+        "max_duration": 12,
+        "default_duration": 6,
+        "unit": "months",
+        "x_title": "30-day period",
+        "duration_label": "Duration (months)",
+        "growth_title": "Month-over-month growth",
+        "row_name": "month",
+        "series_name": "monthly",
+        "comparison": "the previous month",
+        "prior_column": "Vs prior month",
+    },
+}
 
 
 # Meal-build rows are the combo itself. Other rows are the
@@ -25,12 +68,128 @@ MEAL_SUBCATEGORIES = {
 }
 
 
-def format_week(week_start) -> str:
-    """Label a week by its first and last calendar day."""
+def format_period_label(
+    start,
+    end,
+    period_days: int,
+    include_year: bool,
+) -> str:
+    """Short axis label for one bucket."""
 
-    start = pd.Timestamp(week_start)
-    end = start + pd.Timedelta(days=6)
-    return f"{start:%b %d} – {end:%b %d, %Y}"
+    start = pd.Timestamp(start)
+    end = pd.Timestamp(end)
+
+    if period_days == 1:
+        if include_year:
+            return f"{end:%m/%d/%y}"
+        return f"{end:%m/%d}"
+
+    if include_year:
+        return f"{start:%m/%d/%y}–{end:%m/%d/%y}"
+
+    return f"{start:%m/%d}–{end:%m/%d}"
+
+
+def format_period_range(start, end, period_days: int) -> str:
+    """Full date range shown in the heading and tooltips."""
+
+    start = pd.Timestamp(start)
+    end = pd.Timestamp(end)
+
+    if period_days == 1:
+        return f"{end:%b %d, %Y}"
+
+    return f"{start:%b %d, %Y} – {end:%b %d, %Y}"
+
+
+def assign_periods(
+    frame: pd.DataFrame,
+    date_end,
+    period_days: int,
+    duration: int,
+) -> pd.DataFrame:
+    """Tag each row with its period, including one baseline period.
+
+    period_index 0 ends on Date end. The highest index is the
+    period before the chart, used only so the first bar has a
+    previous period to grow against.
+    """
+
+    date_end = pd.Timestamp(date_end).normalize()
+    period_days = int(period_days)
+    duration = int(duration)
+    history_start = date_end - pd.Timedelta(
+        days=period_days * (duration + 1) - 1
+    )
+
+    working = frame.copy()
+    working["business_date"] = pd.to_datetime(
+        working["business_date"],
+        errors="coerce",
+    ).dt.normalize()
+    scoped = working.loc[
+        working["business_date"].between(
+            history_start,
+            date_end,
+            inclusive="both",
+        )
+    ].copy()
+    if scoped.empty:
+        scoped["period_index"] = pd.Series(dtype="int64")
+        return scoped
+
+    scoped["period_index"] = (
+        (date_end - scoped["business_date"]).dt.days // period_days
+    ).astype(int)
+    return scoped.loc[
+        scoped["period_index"].between(0, duration)
+    ].copy()
+
+
+def build_period_calendar(
+    date_end,
+    period_days: int,
+    count: int,
+) -> pd.DataFrame:
+    """One row per period, newest last, including the baseline."""
+
+    date_end = pd.Timestamp(date_end).normalize()
+    period_days = int(period_days)
+    count = int(count)
+    rows = []
+    for period_index in range(count):
+        period_end = date_end - pd.Timedelta(
+            days=period_days * period_index
+        )
+        period_start = period_end - pd.Timedelta(days=period_days - 1)
+        rows.append(
+            {
+                "period_index": period_index,
+                "period_start": period_start,
+                "period_end": period_end,
+            }
+        )
+
+    calendar = pd.DataFrame(rows).sort_values("period_end")
+    include_year = (
+        calendar["period_start"].min().year
+        != calendar["period_end"].max().year
+    )
+    calendar["period_label"] = [
+        format_period_label(start, end, period_days, include_year)
+        for start, end in zip(
+            calendar["period_start"],
+            calendar["period_end"],
+        )
+    ]
+    calendar["period_range"] = [
+        format_period_range(start, end, period_days)
+        for start, end in zip(
+            calendar["period_start"],
+            calendar["period_end"],
+        )
+    ]
+    return calendar.reset_index(drop=True)
 
 
 def format_day(business_date) -> str:
@@ -120,8 +279,10 @@ def share_frame(frame: pd.DataFrame) -> pd.DataFrame:
 
 st.title("Combo Mix")
 st.caption(
-    "Net sales from combos. Each row's Total column is combo "
-    "net sales, and the figures below add those rows up."
+    "Net sales from combos. A day is one business date, a "
+    "week is 7 days, and a month is 30 days, counted "
+    "backward from Date end. Each row's Total column is "
+    "combo net sales, and the figures below add those rows up."
 )
 
 try:
@@ -147,7 +308,7 @@ except Exception:
 
 
 # ---------------------------------------------------------
-# Sidebar: location, week, day, and an optional combo
+# Sidebar: location, period, and an optional combo
 # ---------------------------------------------------------
 
 st.sidebar.header("Filters")
@@ -158,87 +319,109 @@ if location_df.empty:
     st.warning("No combo sales match that location.")
     st.stop()
 
-selected_week_start_name = st.sidebar.selectbox(
-    "Week starts on",
-    options=list(WEEK_START_OPTIONS.keys()),
-)
-week_start_weekday = WEEK_START_OPTIONS[selected_week_start_name]
-weeks_to_display = st.sidebar.slider(
-    "Weeks to display",
-    min_value=2,
-    max_value=26,
-    value=8,
-)
-location_df = add_week_columns(location_df, week_start_weekday)
+location_df["business_date"] = pd.to_datetime(
+    location_df["business_date"],
+    errors="coerce",
+).dt.normalize()
+location_df = location_df.dropna(subset=["business_date"])
 
-week_starts = sorted(
-    location_df["week_start"].dropna().unique(),
-    reverse=True,
-)
-selected_week = st.sidebar.selectbox(
-    "Week",
-    options=week_starts,
-    format_func=format_week,
-)
-
-week_df = location_df[
-    location_df["week_start"] == selected_week
-].copy()
-
-if week_df.empty:
-    st.info("No combo sales fall in that week.")
+if location_df.empty:
+    st.warning("Combo rows for this location have no business date.")
     st.stop()
 
-day_choices = (
-    week_df[["business_date"]]
-    .drop_duplicates()
-    .sort_values("business_date")
+selected_interval = st.sidebar.selectbox(
+    "Interval",
+    options=list(INTERVALS),
+    index=list(INTERVALS).index("Weekly"),
+    help=(
+        "Periods are counted backward from Date end. "
+        "A week is 7 days and a month is 30 days. "
+        "This sets the summary, the trend, and the mix."
+    ),
 )
-day_labels = {
-    pd.Timestamp(value): format_day(value)
-    for value in day_choices["business_date"]
-}
-selected_day_label = st.sidebar.selectbox(
-    "Day",
-    options=["All days", *day_labels.values()],
+interval = INTERVALS[selected_interval]
+period_days = interval["days"]
+period_name = interval["row_name"]
+comparison_label = interval["comparison"]
+
+min_date = location_df["business_date"].min().date()
+max_date = location_df["business_date"].max().date()
+date_key = "combo_mix_date_end"
+
+if date_key not in st.session_state:
+    st.session_state[date_key] = max_date
+else:
+    chosen_date = st.session_state[date_key]
+    if chosen_date < min_date or chosen_date > max_date:
+        st.session_state[date_key] = min(
+            max(chosen_date, min_date),
+            max_date,
+        )
+
+date_end = st.sidebar.date_input(
+    "Date end",
+    min_value=min_date,
+    max_value=max_date,
+    key=date_key,
+    help=(
+        "Last business date included in the summary, "
+        "the trend, and the mix."
+    ),
 )
 
-combo_rank = summarize_combos(week_df)
+duration = st.sidebar.number_input(
+    interval["duration_label"],
+    min_value=1,
+    max_value=interval["max_duration"],
+    value=interval["default_duration"],
+    step=1,
+    key=f"combo_mix_duration_{selected_interval}",
+    help=(
+        f"How many {interval['unit']} to include, ending "
+        "on Date end. "
+        + (
+            "Each month is 30 days. "
+            if period_days == 30
+            else ""
+        )
+        + f"Maximum is {interval['max_duration']}."
+    ),
+)
+duration = int(duration)
+
+if period_days == 1:
+    st.sidebar.caption("Each period is one business day.")
+elif period_days == 7:
+    st.sidebar.caption("Each period is 7 days, ending on Date end.")
+else:
+    st.sidebar.caption("Each period is 30 days, ending on Date end.")
+
+if date_end is None:
+    st.warning("Pick a date end.")
+    st.stop()
+
+scoped = assign_periods(location_df, date_end, period_days, duration)
+calendar = build_period_calendar(
+    date_end,
+    period_days,
+    duration + 1,
+)
+period_df = scoped.loc[scoped["period_index"].eq(0)].copy()
+previous_df = scoped.loc[scoped["period_index"].eq(1)].copy()
+
+combo_rank = summarize_combos(period_df) if not period_df.empty else pd.DataFrame(
+    columns=["product_class"]
+)
 combo_names = combo_rank["product_class"].tolist()
 selected_combo = st.sidebar.selectbox(
     "Combo",
     options=["All combos", *combo_names],
     help=(
-        "Limits the totals, meal builds, and item table. "
-        "The mix chart still includes every combo."
+        "Limits the totals, meal builds, and item table "
+        "to the period ending on Date end. "
+        "The mix chart and trend still include every combo."
     ),
 )
-
-period_df = week_df
-comparison_label = "the previous week"
-if selected_day_label != "All days":
-    selected_dates = [
-        business_date
-        for business_date, label in day_labels.items()
-        if label == selected_day_label
-    ]
-    period_df = week_df[
-        week_df["business_date"].isin(selected_dates)
-    ].copy()
-    comparison_label = "the same weekday in the previous week"
-
-previous_start = pd.Timestamp(selected_week) - pd.Timedelta(days=7)
-previous_df = location_df[
-    location_df["week_start"] == previous_start
-].copy()
-if selected_day_label != "All days":
-    previous_dates = [
-        pd.Timestamp(business_date) - pd.Timedelta(days=7)
-        for business_date in selected_dates
-    ]
-    previous_df = previous_df[
-        previous_df["business_date"].isin(previous_dates)
-    ].copy()
 
 detail_df = period_df
 previous_detail = previous_df
@@ -250,9 +433,22 @@ if selected_combo != "All combos":
         previous_df["product_class"] == selected_combo
     ].copy()
 
-if period_df.empty:
-    st.info("No combo sales fall on that day.")
+visible_rows = scoped.loc[scoped["period_index"].lt(duration)]
+if visible_rows.empty:
+    window_end = pd.Timestamp(date_end)
+    window_start = window_end - pd.Timedelta(
+        days=period_days * duration - 1
+    )
+    st.info(
+        "No combo sales fall between "
+        f"{window_start:%b %d, %Y} and {window_end:%b %d, %Y}."
+    )
     st.stop()
+
+selected_period = calendar.loc[calendar["period_index"].eq(0)].iloc[0]
+period_title = selected_period["period_range"]
+if selected_combo != "All combos":
+    period_title = f"{selected_combo} · {period_title}"
 
 
 def _sum(frame: pd.DataFrame, column_name: str) -> float:
@@ -261,142 +457,137 @@ def _sum(frame: pd.DataFrame, column_name: str) -> float:
     return float(frame[column_name].sum())
 
 
-net_sales = _sum(detail_df, "net_sales")
-previous_net_sales = _sum(previous_detail, "net_sales")
-sales_growth = percent_change(net_sales, previous_net_sales)
-store_net_sales = store_net_sales_for(
-    sales_df,
-    location_df["location_key"].unique(),
-    period_df["business_date"],
-)
-combo_share_of_sales = (
-    net_sales / store_net_sales
-    if pd.notna(store_net_sales) and store_net_sales
-    else float("nan")
-)
-combo_rank_period = summarize_combos(period_df)
-top_combo = combo_rank_period.iloc[0]
-top_combo_name = top_combo["product_class"]
-top_combo_of_combos = float(top_combo["mix"])
-top_combo_of_sales = (
-    float(top_combo["net_sales"]) / store_net_sales
-    if pd.notna(store_net_sales) and store_net_sales
-    else float("nan")
-)
-top_builds = period_df[
-    (period_df["product_class"] == top_combo_name)
-    & period_df["product_subcategory"].isin(MEAL_SUBCATEGORIES)
-]
-if top_builds.empty:
-    top_build_name = "—"
+if period_df.empty:
+    st.subheader(period_title)
+    st.info(
+        "No combo sales fall in "
+        f"{selected_period['period_range']}."
+    )
 else:
-    top_build_name = (
-        top_builds.assign(
-            build=top_builds["product_name"].map(clean_product_name)
+    net_sales = _sum(detail_df, "net_sales")
+    previous_net_sales = _sum(previous_detail, "net_sales")
+    sales_growth = percent_change(net_sales, previous_net_sales)
+    store_net_sales = store_net_sales_for(
+        sales_df,
+        location_df["location_key"].unique(),
+        period_df["business_date"],
+    )
+    combo_share_of_sales = (
+        net_sales / store_net_sales
+        if pd.notna(store_net_sales) and store_net_sales
+        else float("nan")
+    )
+    combo_rank_period = summarize_combos(period_df)
+    top_combo = combo_rank_period.iloc[0]
+    top_combo_name = top_combo["product_class"]
+    top_combo_of_combos = float(top_combo["mix"])
+    top_combo_of_sales = (
+        float(top_combo["net_sales"]) / store_net_sales
+        if pd.notna(store_net_sales) and store_net_sales
+        else float("nan")
+    )
+    top_builds = period_df[
+        (period_df["product_class"] == top_combo_name)
+        & period_df["product_subcategory"].isin(MEAL_SUBCATEGORIES)
+    ]
+    if top_builds.empty:
+        top_build_name = "—"
+    else:
+        top_build_name = (
+            top_builds.assign(
+                build=top_builds["product_name"].map(clean_product_name)
+            )
+            .groupby("build")["net_sales"]
+            .sum()
+            .sort_values(ascending=False)
+            .index[0]
         )
-        .groupby("build")["net_sales"]
-        .sum()
-        .sort_values(ascending=False)
-        .index[0]
+
+    st.subheader(period_title)
+
+    sales_columns = st.columns(3)
+    sales_columns[0].metric(
+        "Combo net sales",
+        format_metric_value(net_sales, "currency"),
+        delta=(
+            None
+            if pd.isna(sales_growth)
+            else f"{sales_growth:+.1f}%"
+        ),
+        help=(
+            f"Sum of the Total column. Compared with "
+            f"{comparison_label}: "
+            f"{format_metric_value(previous_net_sales, 'currency')}."
+        ),
+    )
+    sales_columns[1].metric(
+        "Combo share of net sales",
+        format_percent(combo_share_of_sales),
+        help=(
+            "The combo net sales above, divided by total store "
+            "net sales for this location and the selected period."
+        ),
+    )
+    sales_columns[2].metric(
+        "Highest selling combo",
+        top_combo_name,
+        help=escape_dollar_signs(
+            f"{format_metric_value(top_combo['net_sales'], 'currency')} "
+            "in combo net sales."
+        ),
+    )
+    top_columns = st.columns(3)
+    top_columns[0].metric(
+        f"{top_combo_name} share of total net sales",
+        format_percent(top_combo_of_sales),
+    )
+    top_columns[1].metric(
+        f"{top_combo_name} share of combo net sales",
+        format_percent(top_combo_of_combos),
+    )
+    top_columns[2].metric(
+        f"Highest selling {top_combo_name} type",
+        top_build_name,
+    )
+    st.caption(
+        f"The change on combo net sales is versus {comparison_label}."
     )
 
-period_title = (
-    format_week(selected_week)
-    if selected_day_label == "All days"
-    else f"{selected_day_label}, {format_week(selected_week)}"
-)
-if selected_combo != "All combos":
-    period_title = f"{selected_combo} · {period_title}"
-
-st.subheader(period_title)
-
-sales_columns = st.columns(3)
-sales_columns[0].metric(
-    "Combo net sales",
-    format_metric_value(net_sales, "currency"),
-    delta=(
-        None
-        if pd.isna(sales_growth)
-        else f"{sales_growth:+.1f}%"
-    ),
-    help=(
-        f"Sum of the Total column. Compared with "
-        f"{comparison_label}: "
-        f"{format_metric_value(previous_net_sales, 'currency')}."
-    ),
-)
-sales_columns[1].metric(
-    "Combo share of net sales",
-    format_percent(combo_share_of_sales),
-    help=(
-        "The combo net sales above, divided by total store "
-        "net sales for this location, week, and day."
-    ),
-)
-sales_columns[2].metric(
-    "Highest selling combo",
-    top_combo_name,
-    help=escape_dollar_signs(
-        f"{format_metric_value(top_combo['net_sales'], 'currency')} "
-        "in combo net sales."
-    ),
-)
-top_columns = st.columns(3)
-top_columns[0].metric(
-    f"{top_combo_name} share of total net sales",
-    format_percent(top_combo_of_sales),
-)
-top_columns[1].metric(
-    f"{top_combo_name} share of combo net sales",
-    format_percent(top_combo_of_combos),
-)
-top_columns[2].metric(
-    f"Highest selling {top_combo_name} type",
-    top_build_name,
-)
-st.caption(f"The change on combo net sales is versus {comparison_label}.")
-
 
 # ---------------------------------------------------------
-# Recent weeks, then the mix for the selected week
+# Trend across the selected periods, then the mix
 # ---------------------------------------------------------
 
-weekly_all = (
-    location_df.groupby("week_start", as_index=False)
+grouped_periods = (
+    scoped.groupby("period_index", as_index=False)
     .agg(net_sales=("net_sales", "sum"))
-    .sort_values("week_start")
 )
-weekly_all = reindex_weekly(weekly_all, location_df["week_start"])
-weekly_all["previous_net_sales"] = weekly_all["net_sales"].shift(1)
-weekly_all["growth"] = [
+trend_df = calendar.merge(
+    grouped_periods,
+    on="period_index",
+    how="left",
+)
+trend_df = trend_df.sort_values("period_end")
+trend_df["previous_net_sales"] = trend_df["net_sales"].shift(1)
+trend_df["growth"] = [
     percent_change(current, previous)
     for current, previous in zip(
-        weekly_all["net_sales"],
-        weekly_all["previous_net_sales"],
+        trend_df["net_sales"],
+        trend_df["previous_net_sales"],
     )
 ]
-selected_positions = weekly_all.index[
-    weekly_all["week_start"] == pd.Timestamp(selected_week)
-]
-if len(selected_positions):
-    window_end = int(selected_positions[0]) + 1
-    window_start = max(0, window_end - weeks_to_display)
-    weekly_df = weekly_all.iloc[window_start:window_end].copy()
-else:
-    weekly_df = weekly_all.tail(weeks_to_display).copy()
-weekly_df["week_label"] = weekly_df["week_start"].dt.strftime("%b %d")
-weekly_df["is_selected"] = (
-    weekly_df["week_start"] == pd.Timestamp(selected_week)
-)
-week_label_order = weekly_df["week_label"].tolist()
+trend_df = trend_df.loc[trend_df["period_index"].lt(duration)].copy()
+trend_df["is_selected"] = trend_df["period_index"].eq(0)
+period_label_order = trend_df["period_label"].tolist()
+label_angle = 0 if duration <= 12 else -40
 
-weekly_max = float(weekly_df["net_sales"].max(skipna=True))
-if pd.isna(weekly_max) or weekly_max <= 0:
-    weekly_axis_max = 1.0
+trend_max = float(trend_df["net_sales"].max(skipna=True))
+if pd.isna(trend_max) or trend_max <= 0:
+    trend_axis_max = 1.0
 else:
-    weekly_axis_max = weekly_max * 1.05
+    trend_axis_max = trend_max * 1.05
 
-growth_values = weekly_df["growth"].dropna()
+growth_values = trend_df["growth"].dropna()
 if growth_values.empty:
     growth_axis_min = -1.0
     growth_axis_max = 1.0
@@ -410,15 +601,15 @@ else:
     growth_axis_min = raw_growth_min - growth_padding
     growth_axis_max = raw_growth_max + growth_padding
 
-weekly_bars = (
-    alt.Chart(weekly_df)
+period_bars = (
+    alt.Chart(trend_df)
     .mark_bar()
     .encode(
         x=alt.X(
-            "week_label:N",
+            "period_label:N",
             title=None,
-            sort=week_label_order,
-            axis=alt.Axis(labelAngle=0),
+            sort=period_label_order,
+            axis=alt.Axis(labelAngle=label_angle),
         ),
         y=alt.Y(
             "net_sales:Q",
@@ -427,7 +618,7 @@ weekly_bars = (
                 format="$,.0f",
                 titleColor="#1f77b4",
             ),
-            scale=alt.Scale(domain=[0, weekly_axis_max]),
+            scale=alt.Scale(domain=[0, trend_axis_max]),
         ),
         color=alt.condition(
             alt.datum.is_selected,
@@ -435,7 +626,7 @@ weekly_bars = (
             alt.value("#9ecae1"),
         ),
         tooltip=[
-            alt.Tooltip("week_label:N", title="Week of"),
+            alt.Tooltip("period_range:N", title=interval["x_title"]),
             alt.Tooltip(
                 "net_sales:Q",
                 title="Combo net sales",
@@ -443,14 +634,14 @@ weekly_bars = (
             ),
             alt.Tooltip(
                 "growth:Q",
-                title="Week-over-week growth",
+                title=interval["growth_title"],
                 format="+.1f",
             ),
         ],
     )
 )
 growth_line = (
-    alt.Chart(weekly_df)
+    alt.Chart(trend_df)
     .mark_line(
         color="#ff7f0e",
         strokeWidth=3,
@@ -458,13 +649,13 @@ growth_line = (
     )
     .encode(
         x=alt.X(
-            "week_label:N",
+            "period_label:N",
             title=None,
-            sort=week_label_order,
+            sort=period_label_order,
         ),
         y=alt.Y(
             "growth:Q",
-            title="Week-over-week growth",
+            title=interval["growth_title"],
             axis=alt.Axis(
                 orient="right",
                 format=".1f",
@@ -477,10 +668,10 @@ growth_line = (
             ),
         ),
         tooltip=[
-            alt.Tooltip("week_label:N", title="Week of"),
+            alt.Tooltip("period_range:N", title=interval["x_title"]),
             alt.Tooltip(
                 "growth:Q",
-                title="Week-over-week growth",
+                title=interval["growth_title"],
                 format="+.1f",
             ),
         ],
@@ -501,29 +692,30 @@ zero_growth_line = (
     )
 )
 trend = (
-    alt.layer(weekly_bars, growth_line, zero_growth_line)
+    alt.layer(period_bars, growth_line, zero_growth_line)
     .resolve_scale(y="independent")
     .properties(height=320)
 )
 
-st.subheader("Combo net sales by week")
+st.subheader(f"Combo net sales by {period_name}")
 st.altair_chart(trend, use_container_width=True)
 st.caption(
-    "Blue bars are weekly combo net sales. The darker bar is "
-    "the week selected above. The orange line is the change "
-    "versus the previous week, and the dashed line is 0%."
+    f"Blue bars are {interval['series_name']} combo net sales. "
+    f"The darker bar is the {period_name} ending on Date end. "
+    f"The orange line is the change versus the previous "
+    f"{period_name}, and the dashed line is 0%."
 )
 
-latest_week = location_df["week_start"].max()
-days_in_latest_week = location_df.loc[
-    location_df["week_start"] == latest_week,
-    "business_date",
-].nunique()
-if days_in_latest_week < 7:
+days_in_selected = int(period_df["business_date"].nunique())
+if 0 < days_in_selected < period_days:
     st.caption(
-        "The latest week includes only the business dates "
-        f"loaded so far ({days_in_latest_week} of 7)."
+        f"The {period_name} ending on Date end includes only "
+        "the business dates loaded so far "
+        f"({days_in_selected} of {period_days})."
     )
+
+if period_df.empty:
+    st.stop()
 
 mix_df = summarize_combos(period_df)
 if pd.notna(store_net_sales) and store_net_sales:
@@ -645,7 +837,7 @@ combo_table = combo_table.merge(
     on="product_class",
     how="left",
 )
-combo_table["vs_prior_week"] = [
+combo_table["vs_prior_period"] = [
     percent_change(current, previous)
     for current, previous in zip(
         combo_table["net_sales"],
@@ -664,7 +856,7 @@ st.dataframe(
             "net_sales_per_item",
             "discounts",
             "voids",
-            "vs_prior_week",
+            "vs_prior_period",
         ]
     ],
     use_container_width=True,
@@ -699,8 +891,8 @@ st.dataframe(
             "Voids",
             format="%.0f",
         ),
-        "vs_prior_week": st.column_config.NumberColumn(
-            "Vs prior week",
+        "vs_prior_period": st.column_config.NumberColumn(
+            interval["prior_column"],
             format="%+.1f%%",
         ),
     },
@@ -733,7 +925,9 @@ if day_count > 1:
                 "day_label:N",
                 title=None,
                 sort=day_order,
-                axis=alt.Axis(labelAngle=0),
+                axis=alt.Axis(
+                    labelAngle=0 if day_count <= 10 else -40,
+                ),
             ),
             y=alt.Y(
                 "net_sales:Q",

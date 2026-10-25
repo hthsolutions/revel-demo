@@ -15,7 +15,6 @@ from revel_data import (
     NOT_AVAILABLE,
     SHIFT_SUMMARY_TABLE,
     STORE_TIMEZONE,
-    WEEKDAY_NAMES,
     MissingSecretError,
     get_table_columns,
     load_hme_departures,
@@ -27,8 +26,20 @@ from revel_data import (
 )
 
 
-# Weeks only. Each week is 7 days, counted backward from Date end.
+# Fixed-length buckets counted backward from Date end.
+# A month is 30 days so every month is the same length,
+# matching Sales Growth and Labor %.
 INTERVALS = {
+    "Daily": {
+        "days": 1,
+        "max_duration": 60,
+        "default_duration": 30,
+        "unit": "days",
+        "x_title": "Business date",
+        "duration_label": "Duration (days)",
+        "summary_title": "Selected Day vs Previous Day",
+        "row_name": "day",
+    },
     "Weekly": {
         "days": 7,
         "max_duration": 52,
@@ -37,6 +48,17 @@ INTERVALS = {
         "x_title": "Week",
         "duration_label": "Duration (weeks)",
         "summary_title": "Selected Week vs Previous Week",
+        "row_name": "week",
+    },
+    "Monthly": {
+        "days": 30,
+        "max_duration": 12,
+        "default_duration": 6,
+        "unit": "months",
+        "x_title": "30-day period",
+        "duration_label": "Duration (months)",
+        "summary_title": "Selected Month vs Previous Month",
+        "row_name": "month",
     },
 }
 
@@ -1077,7 +1099,7 @@ def render_heatmap(
     tooltip: list,
     legend_chart,
 ):
-    """Week-by-hour heatmap. Both charts share these axis domains."""
+    """Period-by-hour heatmap. Both charts share these axis domains."""
 
     hour_axis_enc = alt.X(
         "hour_label:N",
@@ -1146,21 +1168,6 @@ def display_hour_frame() -> pd.DataFrame:
     )
 
 
-def keep_weekday(frame: pd.DataFrame, weekday_name: str) -> pd.DataFrame:
-    """Keep one weekday, or every day when the choice is All days."""
-
-    if (
-        weekday_name == "All days"
-        or frame.empty
-        or "business_date" not in frame.columns
-    ):
-        return frame
-
-    weekday_index = WEEKDAY_NAMES.index(weekday_name)
-    dates = pd.to_datetime(frame["business_date"])
-    return frame.loc[dates.dt.weekday.eq(weekday_index)].copy()
-
-
 def in_display_window(frame: pd.DataFrame) -> pd.DataFrame:
     """Keep rows whose clock hour is from 10 AM through 11 PM."""
 
@@ -1185,7 +1192,9 @@ def hour_axis(label_order: list[str]) -> alt.X:
 st.title("SpLH & Drive-Thru")
 st.caption(
     "Sales per labor hour and drive-thru lane time for the "
-    "same weeks. Hourly charts run from 10:00 AM through "
+    "same periods. A day is one business date, a week is "
+    "7 days, and a month is 30 days, counted backward from "
+    "Date end. Hourly charts run from 10:00 AM through "
     "11:00 PM. GM shifts are excluded."
 )
 
@@ -1372,8 +1381,19 @@ else:
             max_date,
         )
 
-interval = INTERVALS["Weekly"]
+selected_interval = st.sidebar.selectbox(
+    "Interval",
+    options=list(INTERVALS),
+    index=list(INTERVALS).index("Weekly"),
+    help=(
+        "Periods are counted backward from Date end. "
+        "A week is 7 days and a month is 30 days. "
+        "This sets the summary metrics and both heatmaps."
+    ),
+)
+interval = INTERVALS[selected_interval]
 period_days = interval["days"]
+period_name = interval["row_name"]
 
 date_end = st.sidebar.date_input(
     "Date end",
@@ -1391,24 +1411,25 @@ duration = st.sidebar.number_input(
     max_value=interval["max_duration"],
     value=interval["default_duration"],
     step=1,
-    key="splh_drive_thru_duration_Weekly",
+    key=f"splh_drive_thru_duration_{selected_interval}",
     help=(
-        "How many weeks to include, ending on Date end. "
-        "Each week is 7 days. Maximum is "
-        f"{interval['max_duration']}."
+        f"How many {interval['unit']} to include, ending "
+        "on Date end. "
+        + (
+            "Each month is 30 days. "
+            if period_days == 30
+            else ""
+        )
+        + f"Maximum is {interval['max_duration']}."
     ),
 )
 duration = int(duration)
-st.sidebar.caption("Each week is 7 days, ending on Date end.")
-
-selected_weekday = st.sidebar.selectbox(
-    "Weekday",
-    options=["All days", *WEEKDAY_NAMES],
-    help=(
-        "Limit each week to that weekday. "
-        "All days keeps the full 7 days."
-    ),
-)
+if period_days == 1:
+    st.sidebar.caption("Each period is one business day.")
+elif period_days == 7:
+    st.sidebar.caption("Each period is 7 days, ending on Date end.")
+else:
+    st.sidebar.caption("Each period is 30 days, ending on Date end.")
 
 st.sidebar.header("Color breaks")
 GREEN_SPLH = float(
@@ -1506,10 +1527,6 @@ quarter_df = rows_in_periods(
     duration + 1,
 )
 hme_df = rows_in_periods(hme_df, date_end, period_days, duration + 1)
-combined = keep_weekday(combined, selected_weekday)
-labor_detail = keep_weekday(labor_detail, selected_weekday)
-quarter_df = keep_weekday(quarter_df, selected_weekday)
-hme_df = keep_weekday(hme_df, selected_weekday)
 
 metrics = build_period_metrics(
     combined,
@@ -1546,23 +1563,15 @@ rush_is_valid = (
 # ---------------------------------------------------------
 
 st.subheader(interval["summary_title"])
-weekday_text = (
-    ""
-    if selected_weekday == "All days"
-    else f" · {selected_weekday}s"
-)
 st.caption(
     f"{window_text} · {duration} {interval['unit']}"
-    f"{weekday_text} · {selected_location}"
+    f" · {selected_location}"
 )
 
-if selected_weekday == "All days":
-    current_range = (
-        f"{current['period_range']} "
-        f"({int(current['days_counted'])} of {period_days} days)"
-    )
-else:
-    current_range = f"{selected_weekday}, {current['period_range']}"
+current_range = (
+    f"{current['period_range']} "
+    f"({int(current['days_counted'])} of {period_days} days)"
+)
 summary_columns = st.columns(3)
 summary_columns[0].metric(
     "Sales",
@@ -1683,17 +1692,8 @@ else:
     )
 
 if int(current["days_counted"]) == 0:
-    if selected_weekday == "All days":
-        st.info(f"No activity falls in {current['period_range']}.")
-    else:
-        st.info(
-            f"No {selected_weekday} activity falls in "
-            f"{current['period_range']}."
-        )
-elif (
-    selected_weekday == "All days"
-    and int(current["days_counted"]) < period_days
-):
+    st.info(f"No activity falls in {current['period_range']}.")
+elif int(current["days_counted"]) < period_days:
     st.caption(
         f"The period ending {pd.Timestamp(current['period_end']):%b %d, %Y} "
         f"has {int(current['days_counted'])} of {period_days} day(s) "
@@ -1701,17 +1701,10 @@ elif (
     )
 
 if previous is None or int(previous["days_counted"]) == 0:
-    if selected_weekday == "All days":
-        st.info(
-            "The previous week has no sales, labor, or drive-thru "
-            "cars, so there is nothing to compare against yet."
-        )
-    else:
-        st.info(
-            f"The previous week has no {selected_weekday} sales, "
-            "labor, or drive-thru cars, so there is nothing to "
-            "compare against yet."
-        )
+    st.info(
+        "The previous period has no sales, labor, or drive-thru "
+        "cars, so there is nothing to compare against yet."
+    )
 
 
 window_hourly = combined.loc[
@@ -1733,7 +1726,7 @@ def period_rows() -> pd.DataFrame:
 
 
 # ---------------------------------------------------------
-# SpLH and drive-thru heatmaps, on the same weeks and hours
+# SpLH and drive-thru heatmaps, on the same periods and hours
 # ---------------------------------------------------------
 
 row_meta = period_rows()
@@ -1752,12 +1745,12 @@ window_labor = labor_detail.loc[
 ) else labor_detail.iloc[0:0]
 window_labor = in_display_window(window_labor)
 
-st.subheader("SpLH by week")
+st.subheader(f"SpLH by {period_name}")
 
 if not hour_order:
     st.info(
         "No hourly sales, labor hours, or drive-thru departures "
-        "fall in the selected weeks."
+        f"fall in the selected {period_name}s."
     )
 else:
     if window_hourly.empty:
@@ -1824,7 +1817,7 @@ else:
         row_order,
         hour_order,
         [
-            alt.Tooltip("row_label:N", title="Week"),
+            alt.Tooltip("row_label:N", title=interval["x_title"]),
             alt.Tooltip("period_range:N", title="Dates"),
             alt.Tooltip("hour_label:N", title="Hour"),
             alt.Tooltip(
@@ -1862,15 +1855,17 @@ else:
         "and above are green, darker as the rate rises. "
     )
     if len(row_order) > 1:
-        splh_caption += "The All row pools every week in the selection. "
+        splh_caption += (
+            f"The All row pools every {period_name} in the selection. "
+        )
     st.caption(
         splh_caption
         + "Both heatmaps show 10:00 AM through 11:00 PM, "
-        + "with the same weeks. Employee names are the "
+        + f"with the same {period_name}s. Employee names are the "
         + "people clocked in during that hour."
     )
 
-    st.subheader("Drive-thru time by week")
+    st.subheader(f"Drive-thru time by {period_name}")
     if (
         window_cars.empty
         or "hour" not in window_cars.columns
@@ -1950,7 +1945,7 @@ else:
         row_order,
         hour_order,
         [
-            alt.Tooltip("row_label:N", title="Week"),
+            alt.Tooltip("row_label:N", title=interval["x_title"]),
             alt.Tooltip("period_range:N", title="Dates"),
             alt.Tooltip("hour_label:N", title="Hour"),
             alt.Tooltip("lane_total_label:N", title="Lane total"),
@@ -1984,11 +1979,13 @@ else:
         "slower lane. "
     )
     if len(row_order) > 1:
-        lane_caption += "The All row pools every week in the selection. "
+        lane_caption += (
+            f"The All row pools every {period_name} in the selection. "
+        )
     st.caption(
         lane_caption
         + "Both heatmaps show 10:00 AM through 11:00 PM, "
-        + "with the same weeks. Employee names are the "
+        + f"with the same {period_name}s. Employee names are the "
         + "people clocked in during that hour. "
         + f"Showing {window_text}."
     )
@@ -2349,12 +2346,7 @@ else:
 st.caption(
     f"Displaying {duration:,} {interval['unit']} for "
     f"{selected_location.lower()}, ending "
-    f"{pd.Timestamp(date_end):%b %d, %Y}"
-    + (
-        "."
-        if selected_weekday == "All days"
-        else f", {selected_weekday}s only."
-    )
-    + " SpLH uses the same hourly sales and shift clocks as "
+    f"{pd.Timestamp(date_end):%b %d, %Y}. "
+    "SpLH uses the same hourly sales and shift clocks as "
     "SpLH per Hour. Lane time weights every car equally."
 )

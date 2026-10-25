@@ -6,7 +6,6 @@ from revel_data import (
     WEEKDAY_NAMES,
     MissingSecretError,
     escape_dollar_signs,
-    format_metric_value,
     load_combo_mix,
     load_sales_data,
     location_filter_controls,
@@ -197,6 +196,17 @@ def format_day(business_date) -> str:
 
     stamp = pd.Timestamp(business_date)
     return f"{WEEKDAY_NAMES[stamp.weekday()][:3]} {stamp:%m/%d}"
+
+
+def format_dollars(value) -> str:
+    """Nearest dollar, with a thousands separator."""
+
+    if value is None or pd.isna(value):
+        return "—"
+
+    rounded = int(round(float(value)))
+    sign = "-" if rounded < 0 else ""
+    return f"{sign}${abs(rounded):,}"
 
 
 def format_percent(value) -> str:
@@ -508,7 +518,7 @@ else:
     sales_columns = st.columns(3)
     sales_columns[0].metric(
         "Combo net sales",
-        format_metric_value(net_sales, "currency"),
+        format_dollars(net_sales),
         delta=(
             None
             if pd.isna(sales_growth)
@@ -517,7 +527,7 @@ else:
         help=(
             f"Sum of the Total column. Compared with "
             f"{comparison_label}: "
-            f"{format_metric_value(previous_net_sales, 'currency')}."
+            f"{format_dollars(previous_net_sales)}."
         ),
     )
     sales_columns[1].metric(
@@ -532,7 +542,7 @@ else:
         "Highest selling combo",
         top_combo_name,
         help=escape_dollar_signs(
-            f"{format_metric_value(top_combo['net_sales'], 'currency')} "
+            f"{format_dollars(top_combo['net_sales'])} "
             "in combo net sales."
         ),
     )
@@ -630,7 +640,7 @@ period_bars = (
             alt.Tooltip(
                 "net_sales:Q",
                 title="Combo net sales",
-                format="$,.2f",
+                format="$,.0f",
             ),
             alt.Tooltip(
                 "growth:Q",
@@ -778,7 +788,7 @@ mix_bars = (
             alt.Tooltip(
                 "net_sales:Q",
                 title="Combo net sales",
-                format="$,.2f",
+                format="$,.0f",
             ),
             alt.Tooltip("share:Q", title="Share", format=".1%"),
         ],
@@ -824,7 +834,7 @@ else:
         escape_dollar_signs(
             "Blue is each combo's share of combo net sales. "
             "Orange is that combo's share of total store net sales "
-            f"({format_metric_value(store_net_sales, 'currency')})."
+            f"({format_dollars(store_net_sales)})."
         )
     )
 
@@ -865,7 +875,7 @@ st.dataframe(
         "product_class": "Combo",
         "net_sales": st.column_config.NumberColumn(
             "Net sales",
-            format="$%.2f",
+            format="$%,.0f",
         ),
         "mix": st.column_config.NumberColumn(
             "Share of combo sales",
@@ -881,11 +891,11 @@ st.dataframe(
         ),
         "net_sales_per_item": st.column_config.NumberColumn(
             "Net sales / item",
-            format="$%.2f",
+            format="$%,.0f",
         ),
         "discounts": st.column_config.NumberColumn(
             "Discounts",
-            format="$%.2f",
+            format="$%,.0f",
         ),
         "voids": st.column_config.NumberColumn(
             "Voids",
@@ -947,7 +957,7 @@ if day_count > 1:
                 alt.Tooltip(
                     "net_sales:Q",
                     title="Net sales",
-                    format="$,.2f",
+                    format="$,.0f",
                 ),
             ],
         )
@@ -1009,7 +1019,7 @@ if not builds.empty:
                 alt.Tooltip(
                     "net_sales:Q",
                     title="Net sales",
-                    format="$,.2f",
+                    format="$,.0f",
                 ),
                 alt.Tooltip("mix:Q", title="Mix", format=".1%"),
                 alt.Tooltip("items:Q", title="Items", format=",.0f"),
@@ -1070,7 +1080,7 @@ st.dataframe(
         ),
         "net_sales": st.column_config.NumberColumn(
             "Net sales",
-            format="$%.2f",
+            format="$%,.0f",
         ),
         "mix": st.column_config.NumberColumn(
             "Mix",
@@ -1078,7 +1088,7 @@ st.dataframe(
         ),
         "discounts": st.column_config.NumberColumn(
             "Discounts",
-            format="$%.2f",
+            format="$%,.0f",
         ),
         "voids": st.column_config.NumberColumn(
             "Voids",

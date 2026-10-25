@@ -817,7 +817,7 @@ def available_dates(*frames: pd.DataFrame) -> pd.Series:
 # Page
 # ---------------------------------------------------------
 
-st.title("Summary")
+st.title("Summary (Weekly)")
 st.caption(
     "Every store in Supabase, for the selected day and the "
     "7 days ending on that date. A new store shows up here as "

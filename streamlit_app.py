@@ -11,7 +11,7 @@ navigation = st.navigation(
     [
         st.Page(
             "views/summary.py",
-            title="Summary",
+            title="Summary (Weekly)",
             icon="🏪",
             default=True,
         ),

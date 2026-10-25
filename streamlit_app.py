@@ -70,6 +70,11 @@ navigation = st.navigation(
             title="Waste %",
             icon="🗑️",
         ),
+        st.Page(
+            "views/google_reviews.py",
+            title="Google Reviews",
+            icon="⭐",
+        ),
     ]
 )
 

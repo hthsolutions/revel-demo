@@ -357,11 +357,24 @@ def load_google_reviews() -> pd.DataFrame:
             "location_key",
             "business_date",
             "rating",
+            "reviewer_name",
+            "likes_count",
+            "owner_response",
+            "owner_response_date",
         ]
     )
     dataframe = fetch_table(
         GOOGLE_REVIEWS_TABLE,
-        ["review_id", "city", "rating", "reviewed_at_date"],
+        [
+            "review_id",
+            "city",
+            "rating",
+            "reviewed_at_date",
+            "reviewer_name",
+            "likes_count",
+            "owner_response",
+            "owner_response_at_date",
+        ],
         "reviewed_at_date",
     )
     if dataframe.empty:
@@ -382,7 +395,22 @@ def load_google_reviews() -> pd.DataFrame:
     dataframe["business_date"] = (
         reviewed.dt.tz_localize(None).dt.normalize()
     )
-    dataframe = _coerce_numeric(dataframe, ["rating"])
+    responded = pd.to_datetime(
+        dataframe["owner_response_at_date"],
+        errors="coerce",
+        utc=True,
+    )
+    dataframe["owner_response_date"] = (
+        responded.dt.tz_localize(None).dt.normalize()
+    )
+    dataframe["reviewer_name"] = (
+        dataframe["reviewer_name"].fillna("").astype(str).str.strip()
+    )
+    dataframe["owner_response"] = (
+        dataframe["owner_response"].fillna("").astype(str).str.strip()
+    )
+    dataframe = _coerce_numeric(dataframe, ["rating", "likes_count"])
+    dataframe["likes_count"] = dataframe["likes_count"].fillna(0)
     dataframe = _add_location_key(dataframe)
     dataframe = dataframe.dropna(subset=["business_date"])
     dataframe = dataframe.drop_duplicates(
@@ -396,6 +424,10 @@ def load_google_reviews() -> pd.DataFrame:
             "location_key",
             "business_date",
             "rating",
+            "reviewer_name",
+            "likes_count",
+            "owner_response",
+            "owner_response_date",
         ]
     ].sort_values("business_date")
 

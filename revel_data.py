@@ -1194,23 +1194,55 @@ def percent_change(current_value, previous_value):
     ) * 100
 
 
+DEFAULT_LOCATION = "Leander"
+
+
+def single_location_options(locations) -> tuple[list[str], int]:
+    """Store names, with Leander selected when that store is present."""
+
+    names = sorted(
+        {
+            str(name).strip()
+            for name in locations
+            if pd.notna(name) and str(name).strip()
+        }
+    )
+    default_index = 0
+    for index, name in enumerate(names):
+        if name.casefold() == DEFAULT_LOCATION.casefold():
+            default_index = index
+            break
+    return names, default_index
+
+
+def select_single_location(
+    locations,
+    label: str = "Location",
+) -> str:
+    """Sidebar picker that requires one store."""
+
+    names, default_index = single_location_options(locations)
+    if not names:
+        return ""
+    return st.sidebar.selectbox(
+        label,
+        options=names,
+        index=default_index,
+    )
+
+
 def location_filter_controls(
     dataframe: pd.DataFrame,
     label: str = "Location",
 ) -> tuple[str, pd.DataFrame]:
-    """Render a location picker and apply it to the data."""
+    """Render a single-store picker and apply it to the data."""
 
-    locations = sorted(
-        dataframe["location"].dropna().unique().tolist()
-    )
-
-    selected_location = st.sidebar.selectbox(
+    selected_location = select_single_location(
+        dataframe["location"],
         label,
-        options=["All Locations", *locations],
     )
-
-    if selected_location == "All Locations":
-        return selected_location, dataframe.copy()
+    if selected_location == "":
+        return selected_location, dataframe.iloc[0:0].copy()
 
     return selected_location, dataframe[
         dataframe["location"] == selected_location

@@ -11,6 +11,7 @@ from revel_data import (
     load_sales_data,
     load_shift_data,
     percent_change,
+    select_single_location,
 )
 
 
@@ -776,21 +777,14 @@ available_locations = sorted(
     labor_df["location"].dropna().unique().tolist()
 )
 
-selected_location = st.sidebar.selectbox(
-    "Location",
-    options=["All Locations", *available_locations],
-)
+selected_location = select_single_location(available_locations)
 
-if selected_location != "All Locations":
-    labor_df = labor_df[
-        labor_df["location"] == selected_location
-    ].copy()
-    location_sales_df = daily_sales_df[
-        daily_sales_df["location"] == selected_location
-    ].copy()
-else:
-    labor_df = labor_df.copy()
-    location_sales_df = daily_sales_df.copy()
+labor_df = labor_df[
+    labor_df["location"] == selected_location
+].copy()
+location_sales_df = daily_sales_df[
+    daily_sales_df["location"] == selected_location
+].copy()
 
 if labor_df.empty:
     st.warning(
@@ -1575,10 +1569,9 @@ else:
     if not shift_df.empty:
         hourly_roles_df = shift_df.copy()
 
-        if selected_location != "All Locations":
-            hourly_roles_df = hourly_roles_df[
-                hourly_roles_df["location"] == selected_location
-            ]
+        hourly_roles_df = hourly_roles_df[
+            hourly_roles_df["location"] == selected_location
+        ]
 
         hourly_roles_df = rows_in_periods(
             hourly_roles_df,
@@ -1770,10 +1763,9 @@ else:
     if not shift_df.empty and not counted_ot_days.empty:
         ot_role_source = shift_df.copy()
 
-        if selected_location != "All Locations":
-            ot_role_source = ot_role_source[
-                ot_role_source["location"] == selected_location
-            ]
+        ot_role_source = ot_role_source[
+            ot_role_source["location"] == selected_location
+        ]
 
         ot_role_source = rows_in_periods(
             ot_role_source,

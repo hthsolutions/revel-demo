@@ -23,6 +23,7 @@ from revel_data import (
     load_shift_summary,
     percent_change,
     rollup_drive_thru_times,
+    select_single_location,
 )
 
 
@@ -1326,22 +1327,18 @@ available_locations = sorted(
     set(combined["location"].dropna().tolist())
     | set(hme_df["location"].dropna().tolist())
 )
-selected_location = st.sidebar.selectbox(
-    "Location",
-    options=["All Locations", *available_locations],
-)
+selected_location = select_single_location(available_locations)
 
-if selected_location != "All Locations":
-    combined = combined[
-        combined["location"] == selected_location
+combined = combined[
+    combined["location"] == selected_location
+].copy()
+if not quarter_df.empty:
+    quarter_df = quarter_df[
+        quarter_df["location"] == selected_location
     ].copy()
-    if not quarter_df.empty:
-        quarter_df = quarter_df[
-            quarter_df["location"] == selected_location
-        ].copy()
-    hme_df = hme_df[hme_df["location"] == selected_location].copy()
+hme_df = hme_df[hme_df["location"] == selected_location].copy()
 
-if not labor_detail.empty and selected_location != "All Locations":
+if not labor_detail.empty:
     location_keys = set()
     if not combined.empty and "location_key" in combined.columns:
         location_keys.update(combined["location_key"].dropna().tolist())

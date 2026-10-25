@@ -23,6 +23,7 @@ from revel_data import (
     get_table_columns,
     load_hourly_sales,
     load_shift_summary,
+    select_single_location,
 )
 
 
@@ -588,20 +589,16 @@ st.sidebar.header("Filters")
 available_locations = sorted(
     combined["location"].dropna().unique().tolist()
 )
-selected_location = st.sidebar.selectbox(
-    "Location",
-    options=["All Locations", *available_locations],
-)
+selected_location = select_single_location(available_locations)
 selected_week_start_name = st.sidebar.selectbox(
     "Week starts on",
     options=list(WEEK_START_OPTIONS.keys()),
 )
 week_start_weekday = WEEK_START_OPTIONS[selected_week_start_name]
 
-if selected_location != "All Locations":
-    combined = combined[
-        combined["location"] == selected_location
-    ].copy()
+combined = combined[
+    combined["location"] == selected_location
+].copy()
 
 if combined.empty:
     st.warning("No sales or labor hours match that location.")

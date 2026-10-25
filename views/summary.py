@@ -18,11 +18,6 @@ from revel_data import (
 # still multiplied by 52, and the caption says so.
 WEEKS_IN_YEAR = 52
 
-# The month is the 30 days ending on the selected
-# business date, the same way the week is the 7 days
-# ending on that date.
-DAYS_IN_MONTH = 30
-
 # Roles paid from the salary feed. Their hours stay out
 # of SpLH. GM overtime is also left out of OT hours.
 SALARIED_ROLES = {"GM", "DM"}
@@ -45,8 +40,8 @@ def format_duration(seconds) -> str:
     return f"{sign}{minutes}:{remainder:02d}"
 
 
-def format_date_range(start, end) -> str:
-    """Label a window by its first and last day."""
+def format_week_range(start, end) -> str:
+    """Label a week by its first and last day."""
 
     start = pd.Timestamp(start)
     end = pd.Timestamp(end)
@@ -354,7 +349,7 @@ def store_window(
     annualize: bool,
     shifts_loaded: bool,
 ) -> pd.DataFrame:
-    """KPIs for one date window, plus one pooled row for every store."""
+    """Day or week KPIs, plus one pooled row for every store."""
 
     sales = sum_by_store(sales_daily, "net_sales", start, end)
     wages = sum_by_store(wage_daily, "hourly_wages", start, end)
@@ -440,9 +435,8 @@ def store_window(
 def combine_periods(
     day: pd.DataFrame,
     week: pd.DataFrame,
-    month: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Place day, week, and month measures side by side."""
+    """Place day and week measures side by side for each store."""
 
     day_part = day.rename(
         columns={
@@ -461,15 +455,6 @@ def combine_periods(
             "splh": "week_splh",
             "lane_label": "week_lane",
             "ot_hours": "week_ot_hours",
-        }
-    )
-    month_part = month.rename(
-        columns={
-            "net_sales": "month_net_sales",
-            "hourly_percent": "month_labor_percent",
-            "splh": "month_splh",
-            "lane_label": "month_lane",
-            "ot_hours": "month_ot_hours",
         }
     )
     merged = day_part[
@@ -496,19 +481,6 @@ def combine_periods(
         ],
         on="row_key",
         how="outer",
-    ).merge(
-        month_part[
-            [
-                "row_key",
-                "month_net_sales",
-                "month_labor_percent",
-                "month_splh",
-                "month_lane",
-                "month_ot_hours",
-            ]
-        ],
-        on="row_key",
-        how="outer",
     )
     merged["_all"] = merged["row_key"].eq("ALL").astype(int)
     return (
@@ -526,15 +498,12 @@ def combine_periods(
     )
 
 
-def sales_pie(
-    period: pd.DataFrame,
-    title: str,
-) -> alt.Chart | None:
-    """Net sales, one slice per store, labeled with its share."""
+def sales_pie(week: pd.DataFrame) -> alt.Chart | None:
+    """Week net sales, one slice per store, labeled with its share."""
 
-    plotted = period.loc[
-        (period["row_key"] != "ALL")
-        & period["net_sales"].fillna(0).gt(0)
+    plotted = week.loc[
+        (week["row_key"] != "ALL")
+        & week["net_sales"].fillna(0).gt(0)
     ].copy()
     if plotted.empty:
         return None
@@ -573,7 +542,7 @@ def sales_pie(
     arcs = base.mark_arc(innerRadius=68, outerRadius=148).encode(
         color=alt.Color(
             "legend_label:N",
-            title=title,
+            title="Share of week net sales",
             sort=order,
             scale=alt.Scale(domain=order, scheme="category20"),
             legend=alt.Legend(
@@ -628,11 +597,9 @@ def review_metrics(
     day,
     week_start,
     week_end,
-    month_start,
-    month_end,
     reviews_loaded: bool,
 ) -> pd.DataFrame:
-    """Day, week, month, and lifetime Google reviews for each store."""
+    """Day, week, and lifetime Google review figures for each store."""
 
     result = pd.DataFrame(
         {
@@ -646,10 +613,8 @@ def review_metrics(
         for column in (
             "day_review_count",
             "week_review_count",
-            "month_review_count",
             "day_review_score",
             "week_review_score",
-            "month_review_score",
             "current_review_score",
         ):
             result[column] = float("nan")
@@ -657,11 +622,9 @@ def review_metrics(
 
     day_rows = in_window(reviews, day, day)
     week_rows = in_window(reviews, week_start, week_end)
-    month_rows = in_window(reviews, month_start, month_end)
     pieces = {
         "day": _review_rollup(day_rows),
         "week": _review_rollup(week_rows),
-        "month": _review_rollup(month_rows),
         "current": _review_rollup(reviews),
     }
     for label, rolled in pieces.items():
@@ -691,14 +654,11 @@ def review_metrics(
     result.loc[all_rows, "day_review_score"] = _review_average(day_rows)
     result.loc[all_rows, "week_review_count"] = float(len(week_rows))
     result.loc[all_rows, "week_review_score"] = _review_average(week_rows)
-    result.loc[all_rows, "month_review_count"] = float(len(month_rows))
-    result.loc[all_rows, "month_review_score"] = _review_average(month_rows)
     result.loc[all_rows, "current_review_score"] = _review_average(
         reviews
     )
     result["day_review_count"] = result["day_review_count"].fillna(0)
     result["week_review_count"] = result["week_review_count"].fillna(0)
-    result["month_review_count"] = result["month_review_count"].fillna(0)
     return result
 
 
@@ -727,14 +687,6 @@ def summary_column_config() -> dict:
                 "the selected date."
             ),
         ),
-        "month_net_sales": st.column_config.NumberColumn(
-            "Net sales (month)",
-            format="$%,.0f",
-            help=(
-                "Net sales for the 30 days ending on "
-                "the selected date."
-            ),
-        ),
         "annualized": st.column_config.NumberColumn(
             "Annualized",
             format="$%,.0f",
@@ -752,13 +704,6 @@ def summary_column_config() -> dict:
             format="%.1f%%",
             help=(
                 "Shift wages divided by net sales for those 7 days."
-            ),
-        ),
-        "month_labor_percent": st.column_config.NumberColumn(
-            "Labor % (month)",
-            format="%.1f%%",
-            help=(
-                "Shift wages divided by net sales for those 30 days."
             ),
         ),
         "day_splh": st.column_config.NumberColumn(
@@ -779,15 +724,6 @@ def summary_column_config() -> dict:
                 "are left out of the hours."
             ),
         ),
-        "month_splh": st.column_config.NumberColumn(
-            "SpLH (month)",
-            format="$%,.2f",
-            help=(
-                "Net sales for those 30 days divided by hourly "
-                "labor hours. Salaried roles, including GM, "
-                "are left out of the hours."
-            ),
-        ),
         "day_lane": st.column_config.TextColumn(
             "Drive-thru (day)",
             help="Car-weighted average lane time that day.",
@@ -796,12 +732,6 @@ def summary_column_config() -> dict:
             "Drive-thru (week)",
             help=(
                 "Car-weighted average lane time over those 7 days."
-            ),
-        ),
-        "month_lane": st.column_config.TextColumn(
-            "Drive-thru (month)",
-            help=(
-                "Car-weighted average lane time over those 30 days."
             ),
         ),
         "day_ot_hours": st.column_config.NumberColumn(
@@ -814,14 +744,6 @@ def summary_column_config() -> dict:
             format="%.1f",
             help=(
                 "Overtime hours over those 7 days. "
-                "The GM role is left out."
-            ),
-        ),
-        "month_ot_hours": st.column_config.NumberColumn(
-            "OT hours (month)",
-            format="%.1f",
-            help=(
-                "Overtime hours over those 30 days. "
                 "The GM role is left out."
             ),
         ),
@@ -849,19 +771,6 @@ def summary_column_config() -> dict:
             help=(
                 "Average star rating of the reviews "
                 "posted during those 7 days."
-            ),
-        ),
-        "month_review_count": st.column_config.NumberColumn(
-            "Reviews (month)",
-            format="%.0f",
-            help="Google reviews posted during those 30 days.",
-        ),
-        "month_review_score": st.column_config.NumberColumn(
-            "Avg score (month)",
-            format="%.2f",
-            help=(
-                "Average star rating of the reviews "
-                "posted during those 30 days."
             ),
         ),
         "current_review_score": st.column_config.NumberColumn(
@@ -894,10 +803,10 @@ def available_dates(*frames: pd.DataFrame) -> pd.Series:
 
 st.title("Summary")
 st.caption(
-    "Every store in Supabase, for the selected day, the "
-    "7 days ending on that date, and the 30 days ending "
-    "on that date. A new store shows up here as soon as "
-    "it has sales, shifts, drive-thru cars, or Google reviews."
+    "Every store in Supabase, for the selected day and the "
+    "7 days ending on that date. A new store shows up here as "
+    "soon as it has sales, shifts, drive-thru cars, or "
+    "Google reviews."
 )
 
 sales_error = None
@@ -1008,8 +917,7 @@ business_date = st.sidebar.date_input(
     key=date_key,
     help=(
         "Day columns use this business date. Week columns "
-        "use the 7 days ending on it. Month columns use "
-        "the 30 days ending on it."
+        "and the pie use the 7 days ending on it."
     ),
 )
 if business_date is None:
@@ -1019,13 +927,8 @@ if business_date is None:
 day = pd.Timestamp(business_date).normalize()
 week_end = day
 week_start = day - pd.Timedelta(days=6)
-month_end = day
-month_start = day - pd.Timedelta(days=DAYS_IN_MONTH - 1)
 st.sidebar.caption(
-    f"Trailing 7 days: {format_date_range(week_start, week_end)}."
-)
-st.sidebar.caption(
-    f"Trailing 30 days: {format_date_range(month_start, month_end)}."
+    f"Trailing 7 days: {format_week_range(week_start, week_end)}."
 )
 
 day_metrics = store_window(
@@ -1052,19 +955,7 @@ week_metrics = store_window(
     annualize=True,
     shifts_loaded=shift_error is None,
 )
-month_metrics = store_window(
-    stores,
-    sales_daily,
-    wage_daily,
-    hours_daily,
-    ot_daily,
-    hme_df,
-    month_start,
-    month_end,
-    annualize=False,
-    shifts_loaded=shift_error is None,
-)
-comparison = combine_periods(day_metrics, week_metrics, month_metrics)
+comparison = combine_periods(day_metrics, week_metrics)
 comparison = comparison.merge(
     review_metrics(
         review_df,
@@ -1072,8 +963,6 @@ comparison = comparison.merge(
         day,
         week_start,
         week_end,
-        month_start,
-        month_end,
         reviews_loaded=review_error is None,
     ),
     on="row_key",
@@ -1081,27 +970,13 @@ comparison = comparison.merge(
 )
 
 st.subheader("Week net sales by store")
-week_pie = sales_pie(week_metrics, "Share of week net sales")
-if week_pie is None:
+pie = sales_pie(week_metrics)
+if pie is None:
     st.info("No store recorded net sales in this week.")
 else:
-    st.altair_chart(week_pie, use_container_width=False)
+    st.altair_chart(pie, use_container_width=False)
     st.caption(
         "Each slice is one store's net sales for these 7 days. "
-        "The percentage is drawn on the slice, and again "
-        "beside the store name. A slice under "
-        f"{SLICE_LABEL_MIN_SHARE * 100:.1f}% keeps the "
-        "percentage in the legend so the labels stay apart."
-    )
-
-st.subheader("Month net sales by store")
-month_pie = sales_pie(month_metrics, "Share of month net sales")
-if month_pie is None:
-    st.info("No store recorded net sales in these 30 days.")
-else:
-    st.altair_chart(month_pie, use_container_width=False)
-    st.caption(
-        "Each slice is one store's net sales for these 30 days. "
         "The percentage is drawn on the slice, and again "
         "beside the store name. A slice under "
         f"{SLICE_LABEL_MIN_SHARE * 100:.1f}% keeps the "
@@ -1112,32 +987,24 @@ display_columns = [
     "location",
     "day_net_sales",
     "week_net_sales",
-    "month_net_sales",
     "annualized",
     "day_labor_percent",
     "week_labor_percent",
-    "month_labor_percent",
     "day_splh",
     "week_splh",
-    "month_splh",
     "day_lane",
     "week_lane",
-    "month_lane",
     "day_ot_hours",
     "week_ot_hours",
-    "month_ot_hours",
     "day_review_count",
     "day_review_score",
     "week_review_count",
     "week_review_score",
-    "month_review_count",
-    "month_review_score",
     "current_review_score",
 ]
 st.subheader(
     f"{day:%A, %b %d, %Y}  ·  "
-    f"Trailing 7 days, {format_date_range(week_start, week_end)}  ·  "
-    f"Trailing 30 days, {format_date_range(month_start, month_end)}"
+    f"Trailing 7 days, {format_week_range(week_start, week_end)}"
 )
 st.dataframe(
     comparison[display_columns],
@@ -1160,27 +1027,15 @@ if recorded_days < 7:
         "sales from these 7 days, multiplied by 52."
     )
 
-month_sales = in_window(sales_daily, month_start, month_end)
-recorded_month_days = (
-    int(month_sales["business_date"].nunique())
-    if not month_sales.empty
-    else 0
-)
-if recorded_month_days < DAYS_IN_MONTH:
-    st.caption(
-        f"Sales are recorded on {recorded_month_days} of "
-        f"{DAYS_IN_MONTH} days in the monthly window."
-    )
-
 st.caption(
     "Hourly labor % is shift wages divided by net sales. "
     "SpLH is net sales divided by hourly labor hours, with "
     "salaried roles such as GM left out of the hours. "
     "Drive-thru time is the car-weighted average lane time. "
     "OT hours leave out the GM role. Review counts are "
-    "Google reviews posted that day, during those 7 days, "
-    "or during those 30 days, and the average score is "
-    "the average of those star ratings. "
+    "Google reviews posted that day or during those 7 days, "
+    "and the average score is the average of those star "
+    "ratings. "
     "Current score is the average of every review stored "
     "for the store. All stores adds the stores together, "
     "then divides."

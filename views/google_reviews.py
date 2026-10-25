@@ -144,6 +144,11 @@ def review_column_config() -> dict:
             format="%.0f",
             help="Star rating from 1 to 5.",
         ),
+        "content": st.column_config.TextColumn(
+            "Comment",
+            width="large",
+            help="The reviewer's comment.",
+        ),
         "likes_count": st.column_config.NumberColumn(
             "Likes",
             format="%.0f",
@@ -295,6 +300,7 @@ display = range_df[
         "location",
         "reviewer_name",
         "rating",
+        "content",
         "likes_count",
         "owner_response",
         "owner_response_date",

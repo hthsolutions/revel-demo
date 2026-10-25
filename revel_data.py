@@ -4,6 +4,7 @@ Every page imports from here so that table names, data
 cleaning, and week definitions stay consistent.
 """
 
+import html
 import json
 import os
 
@@ -358,6 +359,7 @@ def load_google_reviews() -> pd.DataFrame:
             "business_date",
             "rating",
             "reviewer_name",
+            "content",
             "likes_count",
             "owner_response",
             "owner_response_date",
@@ -371,6 +373,7 @@ def load_google_reviews() -> pd.DataFrame:
             "rating",
             "reviewed_at_date",
             "reviewer_name",
+            "content",
             "likes_count",
             "owner_response",
             "owner_response_at_date",
@@ -406,6 +409,13 @@ def load_google_reviews() -> pd.DataFrame:
     dataframe["reviewer_name"] = (
         dataframe["reviewer_name"].fillna("").astype(str).str.strip()
     )
+    dataframe["content"] = (
+        dataframe["content"]
+        .fillna("")
+        .astype(str)
+        .map(html.unescape)
+        .str.strip()
+    )
     dataframe["owner_response"] = (
         dataframe["owner_response"].fillna("").astype(str).str.strip()
     )
@@ -425,6 +435,7 @@ def load_google_reviews() -> pd.DataFrame:
             "business_date",
             "rating",
             "reviewer_name",
+            "content",
             "likes_count",
             "owner_response",
             "owner_response_date",

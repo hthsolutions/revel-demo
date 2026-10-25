@@ -923,6 +923,10 @@ if day_count > 1:
         .agg(net_sales=("net_sales", "sum"))
     )
     daily["day_label"] = daily["business_date"].map(format_day)
+    daily["stack_rank"] = (
+        daily.groupby("business_date", sort=False)["net_sales"]
+        .rank(ascending=False, method="first")
+    )
     day_order = [
         format_day(value)
         for value in sorted(period_df["business_date"].unique())
@@ -942,7 +946,7 @@ if day_count > 1:
             y=alt.Y(
                 "net_sales:Q",
                 title="Combo net sales",
-                stack=True,
+                stack="zero",
                 axis=alt.Axis(format="$,.0f"),
             ),
             color=alt.Color(
@@ -951,6 +955,7 @@ if day_count > 1:
                 sort=combo_names,
                 scale=alt.Scale(scheme="category20"),
             ),
+            order=alt.Order("stack_rank:Q", sort="ascending"),
             tooltip=[
                 alt.Tooltip("day_label:N", title="Day"),
                 alt.Tooltip("product_class:N", title="Combo"),
@@ -965,6 +970,10 @@ if day_count > 1:
     )
     st.subheader("Combo net sales by day")
     st.altair_chart(daily_chart, use_container_width=True)
+    st.caption(
+        "Each bar stacks combo net sales, with that day's "
+        "largest combo at the bottom and the smallest at the top."
+    )
 
 if detail_df.empty:
     st.info(f"No {selected_combo} sales in this selection.")

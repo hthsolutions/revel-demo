@@ -1,9 +1,12 @@
+from datetime import datetime, timedelta
+
 import altair as alt
 import pandas as pd
 import streamlit as st
 
 from revel_data import (
     DRIVE_THRU_TIME_COLUMNS,
+    STORE_TIMEZONE,
     MissingSecretError,
     load_google_reviews,
     load_hme_departures,
@@ -784,6 +787,19 @@ def summary_column_config() -> dict:
     }
 
 
+def default_summary_date(min_date, max_date):
+    """Yesterday in Central Time, kept inside the loaded dates.
+
+    Streamlit Community Cloud runs in UTC. The restaurant's
+    business date follows America/Chicago. The picker rejects
+    a value outside min and max, so a yesterday with no rows
+    falls back to the nearest loaded date.
+    """
+
+    yesterday = datetime.now(STORE_TIMEZONE).date() - timedelta(days=1)
+    return min(max(yesterday, min_date), max_date)
+
+
 def available_dates(*frames: pd.DataFrame) -> pd.Series:
     """Business dates present on any loaded table."""
 
@@ -900,7 +916,10 @@ min_date = dates.min().date()
 max_date = dates.max().date()
 date_key = "summary_business_date"
 if date_key not in st.session_state:
-    st.session_state[date_key] = max_date
+    st.session_state[date_key] = default_summary_date(
+        min_date,
+        max_date,
+    )
 else:
     chosen_date = st.session_state[date_key]
     if chosen_date < min_date or chosen_date > max_date:

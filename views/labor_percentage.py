@@ -157,27 +157,6 @@ def format_whole_dollars(value) -> str:
     return f"${value:,.0f}"
 
 
-def melt_labor_rates(
-    frame: pd.DataFrame,
-    id_columns: list[str],
-    rate_series: dict[str, str],
-) -> pd.DataFrame:
-    """One row per hourly, GM, DM, and total labor rate."""
-
-    long_df = frame.melt(
-        id_vars=id_columns,
-        value_vars=list(rate_series.keys()),
-        var_name="rate_series",
-        value_name="rate_percent",
-    )
-
-    long_df["rate_series"] = long_df["rate_series"].map(
-        rate_series
-    )
-
-    return long_df
-
-
 def percent_axis_limits(
     frame: pd.DataFrame,
     rate_columns: list[str],
@@ -1220,7 +1199,7 @@ if summary_current is not None:
 # Labor dollars and labor rate
 # ---------------------------------------------------------
 
-st.subheader("Labor Dollars and Labor Rate")
+st.subheader("Labor %")
 
 if date_end is None:
     st.warning("Pick a date end.")
@@ -1286,27 +1265,12 @@ else:
         ),
     )
 
-    weekly_labor_max = float(
-        rate_df["total_labor"].max()
-    )
-
-    if pd.isna(weekly_labor_max) or weekly_labor_max <= 0:
-        labor_axis_max = 1.0
-    else:
-        labor_axis_max = weekly_labor_max * 1.05
-
-    percent_axis_min, percent_axis_max = percent_axis_limits(
+    _, percent_axis_max = percent_axis_limits(
         rate_df,
         ["labor_percent"],
-        [float(target_labor_percent)],
+        [],
     )
-
-    target_df = pd.DataFrame(
-        {
-            "rate_series": ["Total"],
-            "target": [float(target_labor_percent)],
-        }
-    )
+    percent_scale = alt.Scale(domain=[0, percent_axis_max])
 
     weekly_stacked_df, weekly_type_order = rank_stack(
         stack_labor_types(
@@ -1324,18 +1288,31 @@ else:
         "labor_type",
         "labor_dollars",
     )
+    segment_sales = (
+        weekly_stacked_df["net_sales"]
+        .astype(float)
+        .replace(0.0, NOT_AVAILABLE)
+    )
+    weekly_stacked_df["labor_percent"] = (
+        weekly_stacked_df["labor_dollars"].astype(float)
+        / segment_sales
+        * 100
+    )
 
-    labor_dollar_bars = (
+    labor_percent_bars = (
         alt.Chart(weekly_stacked_df)
         .mark_bar()
         .encode(
             x=period_axis,
             y=alt.Y(
-                "labor_dollars:Q",
-                title="Total Labor",
+                "labor_percent:Q",
+                title="Labor % of Net Sales",
                 stack="zero",
-                axis=alt.Axis(format="$,.0f"),
-                scale=alt.Scale(domain=[0, labor_axis_max]),
+                axis=alt.Axis(
+                    format=".1f",
+                    labelExpr="datum.value + '%'",
+                ),
+                scale=percent_scale,
             ),
             order=alt.Order("stack_rank:Q", sort="ascending"),
             color=alt.Color(
@@ -1356,8 +1333,13 @@ else:
                 ),
                 alt.Tooltip("labor_type:N", title="Labor Type"),
                 alt.Tooltip(
+                    "labor_percent:Q",
+                    title="Labor %",
+                    format=".2f",
+                ),
+                alt.Tooltip(
                     "labor_dollars:Q",
-                    title="Segment",
+                    title="Labor $",
                     format="$,.0f",
                 ),
                 alt.Tooltip(
@@ -1379,176 +1361,17 @@ else:
         )
     )
 
-    weekly_rates_df = melt_labor_rates(
-        rate_df,
-        ["period_label", "period_range"],
-        {"labor_percent": "Total"},
-    )
-
-    total_rate_scale = color_scale(["Total"])
-
-    percent_scale = alt.Scale(
-        domain=[percent_axis_min, percent_axis_max],
-        zero=False,
-    )
-
-    labor_rate_lines = (
-        alt.Chart(weekly_rates_df)
-        .mark_line(
-            strokeWidth=2.5,
-            point=alt.OverlayMarkDef(size=55),
-        )
-        .encode(
-            x=period_axis,
-            y=alt.Y(
-                "rate_percent:Q",
-                title="Labor % of Net Sales",
-                axis=alt.Axis(
-                    orient="right",
-                    format=".1f",
-                    labelExpr="datum.value + '%'",
-                ),
-                scale=percent_scale,
-            ),
-            color=alt.Color(
-                "rate_series:N",
-                title="Labor %",
-                scale=total_rate_scale,
-                legend=None,
-            ),
-            tooltip=[
-                alt.Tooltip(
-                    "period_range:N",
-                    title="Period",
-                ),
-                alt.Tooltip(
-                    "rate_series:N",
-                    title="Rate",
-                ),
-                alt.Tooltip(
-                    "rate_percent:Q",
-                    title="Labor %",
-                    format=".2f",
-                ),
-            ],
-        )
-    )
-
-    net_sales_values = rate_df["net_sales"].dropna()
-
-    if net_sales_values.empty:
-        net_sales_axis_min = 0.0
-        net_sales_axis_max = 1.0
-    else:
-        lowest_net_sales = float(net_sales_values.min())
-        highest_net_sales = float(net_sales_values.max())
-        net_sales_axis_min = lowest_net_sales * 0.75
-        net_sales_axis_max = highest_net_sales * 1.25
-        if net_sales_axis_max <= net_sales_axis_min:
-            net_sales_axis_max = net_sales_axis_min + 1.0
-
-    net_sales_scale = alt.Scale(
-        domain=[net_sales_axis_min, net_sales_axis_max],
-        zero=False,
-        nice=False,
-    )
-
-    net_sales_line = (
-        alt.Chart(rate_df)
-        .mark_line(
-            color="#17becf",
-            strokeWidth=2.5,
-            point=alt.OverlayMarkDef(
-                size=55,
-                color="#17becf",
-            ),
-        )
-        .encode(
-            x=period_axis,
-            y=alt.Y(
-                "net_sales:Q",
-                title="Net Sales",
-                axis=alt.Axis(
-                    orient="right",
-                    offset=90,
-                    format="$,.0f",
-                    titleColor="#17becf",
-                    labelColor="#17becf",
-                    grid=False,
-                ),
-                scale=net_sales_scale,
-            ),
-            tooltip=[
-                alt.Tooltip(
-                    "period_range:N",
-                    title="Period",
-                ),
-                alt.Tooltip(
-                    "net_sales:Q",
-                    title="Net Sales",
-                    format="$,.0f",
-                ),
-            ],
-        )
-    )
-
-    target_rules = (
-        alt.Chart(target_df)
-        .mark_rule(
-            strokeWidth=2,
-            strokeDash=[8, 5],
-        )
-        .encode(
-            y=alt.Y(
-                "target:Q",
-                axis=None,
-                scale=percent_scale,
-            ),
-            color=alt.Color(
-                "rate_series:N",
-                scale=total_rate_scale,
-                legend=None,
-            ),
-            tooltip=[
-                alt.Tooltip(
-                    "rate_series:N",
-                    title="Target",
-                ),
-                alt.Tooltip(
-                    "target:Q",
-                    title="Target %",
-                    format=".1f",
-                ),
-            ],
-        )
-    )
-
-    weekly_labor_chart = (
-        alt.layer(
-            labor_dollar_bars,
-            net_sales_line,
-            labor_rate_lines,
-            target_rules,
-        )
-        .resolve_scale(
-            y="independent",
-            color="independent",
-        )
-        .properties(height=440)
-    )
-
     st.altair_chart(
-        weekly_labor_chart,
+        labor_percent_bars.properties(height=440),
         use_container_width=True,
     )
 
     st.caption(
-        "Bars show hourly, GM, and DM labor dollars, with the "
-        "largest segment at the bottom. The line is total labor "
-        "as a percent of net sales, and the dashed line is the "
-        "total labor target. The outer right axis, in teal, is "
-        "net sales. That axis runs from 75% of the lowest period "
-        "to 125% of the highest period shown."
+        "Each bar is labor as a percent of net sales, split by "
+        "hourly, GM, and DM. The largest segment sits at the "
+        "bottom, and the stack is total labor %. Hover a "
+        "segment for its labor dollars, total labor, and "
+        "net sales."
     )
 
 

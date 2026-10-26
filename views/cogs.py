@@ -434,10 +434,43 @@ def store_color_scale(locations: list[str]) -> alt.Scale:
     )
 
 
+def with_month_label(frame: pd.DataFrame) -> pd.DataFrame:
+    """Add one axis label per calendar month, such as Aug 2026."""
+
+    labeled = frame.copy()
+    labeled["month_label"] = [
+        f"{pd.Timestamp(month):%b %Y}"
+        for month in labeled["start_date"]
+    ]
+    return labeled
+
+
+def month_axis(frame: pd.DataFrame) -> alt.X:
+    """One slot per month, in calendar order.
+
+    A continuous date axis turns two months into a row of
+    daily ticks that all read Aug 2026.
+    """
+
+    order = (
+        frame.sort_values("start_date")["month_label"]
+        .drop_duplicates()
+        .tolist()
+    )
+    angle = -40 if len(order) > 6 else 0
+    return alt.X(
+        "month_label:N",
+        title=None,
+        sort=order,
+        scale=alt.Scale(domain=order),
+        axis=alt.Axis(labelAngle=angle, labelOverlap=False),
+    )
+
+
 def cogs_chart(frame: pd.DataFrame, locations: list[str]) -> alt.Chart:
     """COGS % by month, with a line at the cutoff."""
 
-    scored = frame[frame["cogs_percent"].notna()].copy()
+    scored = with_month_label(frame[frame["cogs_percent"].notna()])
     color = alt.Color(
         "location:N",
         title="Store",
@@ -451,13 +484,9 @@ def cogs_chart(frame: pd.DataFrame, locations: list[str]) -> alt.Chart:
     ) * 1.15
     lines = (
         alt.Chart(scored)
-        .mark_line(point=True)
+        .mark_line(point=alt.OverlayMarkDef(size=80))
         .encode(
-            x=alt.X(
-                "start_date:T",
-                title=None,
-                axis=alt.Axis(format="%b %Y", labelAngle=-40),
-            ),
+            x=month_axis(scored),
             y=alt.Y(
                 "cogs_percent:Q",
                 title="COGS % of net sales",
@@ -467,11 +496,7 @@ def cogs_chart(frame: pd.DataFrame, locations: list[str]) -> alt.Chart:
             color=color,
             tooltip=[
                 alt.Tooltip("location:N", title="Store"),
-                alt.Tooltip(
-                    "start_date:T",
-                    title="Month",
-                    format="%b %Y",
-                ),
+                alt.Tooltip("month_label:N", title="Month"),
                 alt.Tooltip(
                     "cogs_percent:Q",
                     title="COGS %",
@@ -501,16 +526,14 @@ def cogs_chart(frame: pd.DataFrame, locations: list[str]) -> alt.Chart:
 def profit_chart(frame: pd.DataFrame, locations: list[str]) -> alt.Chart:
     """Estimated net profit by store and month."""
 
-    scored = frame[frame["estimated_net_profit"].notna()].copy()
+    scored = with_month_label(
+        frame[frame["estimated_net_profit"].notna()]
+    )
     return (
         alt.Chart(scored)
         .mark_bar()
         .encode(
-            x=alt.X(
-                "start_date:T",
-                title=None,
-                axis=alt.Axis(format="%b %Y", labelAngle=-40),
-            ),
+            x=month_axis(scored),
             xOffset=alt.XOffset("location:N", sort=locations),
             y=alt.Y(
                 "estimated_net_profit:Q",
@@ -525,11 +548,7 @@ def profit_chart(frame: pd.DataFrame, locations: list[str]) -> alt.Chart:
             ),
             tooltip=[
                 alt.Tooltip("location:N", title="Store"),
-                alt.Tooltip(
-                    "start_date:T",
-                    title="Month",
-                    format="%b %Y",
-                ),
+                alt.Tooltip("month_label:N", title="Month"),
                 alt.Tooltip(
                     "estimated_net_profit:Q",
                     title="Estimated net profit",

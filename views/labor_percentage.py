@@ -1268,9 +1268,12 @@ else:
     _, percent_axis_max = percent_axis_limits(
         rate_df,
         ["labor_percent"],
-        [],
+        [float(target_labor_percent)],
     )
     percent_scale = alt.Scale(domain=[0, percent_axis_max])
+    target_df = pd.DataFrame(
+        {"target": [float(target_labor_percent)]}
+    )
 
     weekly_stacked_df, weekly_type_order = rank_stack(
         stack_labor_types(
@@ -1361,17 +1364,42 @@ else:
         )
     )
 
+    target_rule = (
+        alt.Chart(target_df)
+        .mark_rule(
+            strokeWidth=2,
+            strokeDash=[8, 5],
+            color="#ff7f0e",
+        )
+        .encode(
+            y=alt.Y(
+                "target:Q",
+                axis=None,
+                scale=percent_scale,
+            ),
+            tooltip=[
+                alt.Tooltip(
+                    "target:Q",
+                    title="Target %",
+                    format=".1f",
+                ),
+            ],
+        )
+    )
+
     st.altair_chart(
-        labor_percent_bars.properties(height=440),
+        alt.layer(labor_percent_bars, target_rule).properties(
+            height=440
+        ),
         use_container_width=True,
     )
 
     st.caption(
         "Each bar is labor as a percent of net sales, split by "
         "hourly, GM, and DM. The largest segment sits at the "
-        "bottom, and the stack is total labor %. Hover a "
-        "segment for its labor dollars, total labor, and "
-        "net sales."
+        "bottom, and the stack is total labor %. The dashed "
+        "line is the total labor target. Hover a segment for "
+        "its labor dollars, total labor, and net sales."
     )
 
 

@@ -30,6 +30,7 @@ CASH_SUMMARY_TABLE = "daily-revel-cash-summary"
 DISCOUNT_REASON_TABLE = "daily-revel-discount-reason"
 WASTE_LOG_TABLE = "waste_log_history"
 GOOGLE_REVIEWS_TABLE = "google_reviews"
+COGS_TABLE = "cogs_summary"
 
 # One row per store per day. The line detail is JSON.
 COMBO_MIX_DAILY_VIEW = "daily-combo-mix-by-store-day"
@@ -340,6 +341,40 @@ def load_sales_data() -> pd.DataFrame:
     )
 
     return dataframe.sort_values("business_date")
+
+
+@st.cache_data(ttl=300)
+def load_cogs_summary() -> pd.DataFrame:
+    """Monthly cost of goods for each store.
+
+    start_date and end_date are the first and last day of
+    the month the amount belongs to. amount is one cost
+    line inside that month, so a store's COGS is the sum.
+    """
+
+    columns = ["location", "amount", "start_date", "end_date"]
+    empty = pd.DataFrame(columns=[*columns, "location_key"])
+    dataframe = fetch_table(COGS_TABLE, columns, "start_date")
+
+    if dataframe.empty:
+        return empty
+
+    for column_name in ("start_date", "end_date"):
+        dataframe[column_name] = pd.to_datetime(
+            dataframe[column_name],
+            errors="coerce",
+        ).dt.normalize()
+
+    dataframe = _coerce_numeric(dataframe, ["amount"])
+    dataframe = _add_location_key(dataframe)
+    dataframe = dataframe.dropna(subset=["start_date", "end_date"])
+    dataframe = dataframe.loc[
+        dataframe["location_key"] != "UNKNOWN"
+    ].copy()
+
+    return dataframe.sort_values(
+        ["start_date", "location"]
+    ).reset_index(drop=True)
 
 
 @st.cache_data(ttl=300)

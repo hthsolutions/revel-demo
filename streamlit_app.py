@@ -31,6 +31,11 @@ navigation = st.navigation(
             icon="🧾",
         ),
         st.Page(
+            "views/cogs.py",
+            title="COGS",
+            icon="📦",
+        ),
+        st.Page(
             "views/employee_hours.py",
             title="Hourly Employee Hours",
             icon="🕒",

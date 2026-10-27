@@ -549,9 +549,9 @@ def sales_pie(week: pd.DataFrame) -> alt.Chart | None:
             sort=order,
             scale=alt.Scale(domain=order, scheme="category20"),
             legend=alt.Legend(
-                orient="right",
-                columns=1,
-                labelLimit=280,
+                orient="bottom",
+                columns=2,
+                labelLimit=180,
             ),
         ),
     )
@@ -559,7 +559,7 @@ def sales_pie(week: pd.DataFrame) -> alt.Chart | None:
         text="slice_label:N",
         color=alt.value("#1f2933"),
     )
-    return (arcs + labels).properties(width=420, height=420)
+    return (arcs + labels).properties(width=340, height=340)
 
 
 def review_leaderboard(comparison: pd.DataFrame) -> pd.DataFrame:
@@ -691,6 +691,61 @@ def review_metrics(
     result["day_review_count"] = result["day_review_count"].fillna(0)
     result["week_review_count"] = result["week_review_count"].fillna(0)
     return result
+
+
+def leaderboard_column_config() -> dict:
+    """Narrow headers so the leaderboard fits beside the pie."""
+
+    return {
+        "rank": st.column_config.NumberColumn(
+            "#",
+            format="%d",
+            width="small",
+        ),
+        "location": st.column_config.TextColumn(
+            "Store",
+            width=128,
+        ),
+        "week_review_score": st.column_config.NumberColumn(
+            "Week avg",
+            format="%.2f",
+            width="small",
+            help=(
+                "Average star rating of the reviews "
+                "posted during those 7 days."
+            ),
+        ),
+        "week_review_count": st.column_config.NumberColumn(
+            "Week",
+            format="%.0f",
+            width="small",
+            help="Google reviews posted during those 7 days.",
+        ),
+        "day_review_score": st.column_config.NumberColumn(
+            "Day avg",
+            format="%.2f",
+            width="small",
+            help=(
+                "Average star rating of the reviews posted "
+                "on the selected date."
+            ),
+        ),
+        "day_review_count": st.column_config.NumberColumn(
+            "Day",
+            format="%.0f",
+            width="small",
+            help="Google reviews posted on the selected business date.",
+        ),
+        "current_review_score": st.column_config.NumberColumn(
+            "Current",
+            format="%.2f",
+            width="small",
+            help=(
+                "Average star rating of every Google review "
+                "stored for this store."
+            ),
+        ),
+    }
 
 
 def table_height(row_count: int) -> int:
@@ -1022,8 +1077,8 @@ comparison = comparison.merge(
 )
 
 chart_column, leaderboard_column = st.columns(
-    [1.35, 1],
-    gap="large",
+    [1, 1.35],
+    gap="medium",
     vertical_alignment="top",
 )
 
@@ -1056,7 +1111,7 @@ with leaderboard_column:
     st.subheader("Review leaderboard")
     st.dataframe(
         leaderboard[leaderboard_columns],
-        column_config=summary_column_config(),
+        column_config=leaderboard_column_config(),
         hide_index=True,
         use_container_width=True,
         height=table_height(len(leaderboard)),

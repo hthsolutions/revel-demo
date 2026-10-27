@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 import altair as alt
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from revel_data import (
     DRIVE_THRU_TIME_COLUMNS,
@@ -878,6 +879,67 @@ def default_summary_date(min_date, max_date):
     return min(max(yesterday, min_date), max_date)
 
 
+def prepare_pdf_export() -> None:
+    """Hide the navigation and filters when this page is printed.
+
+    The browser print dialog is where the user saves the PDF.
+    Only the report body is included.
+    """
+
+    st.markdown(
+        """
+        <style>
+        @media print {
+          [data-testid="stSidebar"],
+          [data-testid="stHeader"],
+          [data-testid="stToolbar"],
+          [data-testid="stDecoration"],
+          [data-testid="stSidebarCollapsedControl"],
+          [data-testid="stBottom"],
+          .st-key-export_weekly_pdf,
+          iframe {
+            display: none !important;
+          }
+          [data-testid="stAppViewContainer"],
+          [data-testid="stMain"],
+          [data-testid="stMainBlockContainer"],
+          .main {
+            margin: 0 !important;
+            padding-left: 0 !important;
+            width: 100% !important;
+            max-width: 100% !important;
+            position: static !important;
+          }
+          * {
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+          }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def export_pdf_button() -> None:
+    """Open the print dialog so the report can be saved as a PDF."""
+
+    export_pdf = st.button(
+        "Export PDF",
+        key="export_weekly_pdf",
+        help=(
+            "Opens the print dialog. Choose Save as PDF. "
+            "The view list and filters are left out."
+        ),
+    )
+    if export_pdf:
+        components.html(
+            "<script>window.parent.print()</script>",
+            height=0,
+            width=0,
+        )
+
+
 def available_dates(*frames: pd.DataFrame) -> pd.Series:
     """Business dates present on any loaded table."""
 
@@ -895,7 +957,9 @@ def available_dates(*frames: pd.DataFrame) -> pd.Series:
 # Page
 # ---------------------------------------------------------
 
+prepare_pdf_export()
 st.title("Summary (Weekly)")
+export_pdf_button()
 st.caption(
     "Every store in Supabase, for the selected day and the "
     "7 days ending on that date. A new store shows up here as "

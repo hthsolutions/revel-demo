@@ -1,3 +1,4 @@
+import html
 from datetime import datetime, timedelta
 
 import altair as alt
@@ -879,16 +880,104 @@ def default_summary_date(min_date, max_date):
     return min(max(yesterday, min_date), max_date)
 
 
+def _print_blank(value) -> bool:
+    """True when a cell has nothing to print."""
+
+    if value is None:
+        return True
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _print_text(value) -> str:
+    if _print_blank(value):
+        return "—"
+    return str(value)
+
+
+def _print_money(places: int):
+    """Currency rounded to the given number of places."""
+
+    def format_value(value) -> str:
+        if _print_blank(value):
+            return "—"
+        return f"${float(value):,.{places}f}"
+
+    return format_value
+
+
+def _print_percent(places: int):
+    """A percent that is already in percent points."""
+
+    def format_value(value) -> str:
+        if _print_blank(value):
+            return "—"
+        return f"{float(value):,.{places}f}%"
+
+    return format_value
+
+
+def _print_number(places: int):
+    """A count or hours figure."""
+
+    def format_value(value) -> str:
+        if _print_blank(value):
+            return "—"
+        return f"{float(value):,.{places}f}"
+
+    return format_value
+
+
+def print_table(
+    frame: pd.DataFrame,
+    columns: list[tuple[str, str, object]],
+) -> None:
+    """HTML table used only by the PDF.
+
+    The on-screen tables are drawn on a canvas, which the
+    browser leaves blank when printing.
+    """
+
+    header = "".join(
+        f"<th>{html.escape(label)}</th>"
+        for _, label, _formatter in columns
+    )
+    body_rows = []
+    for _, row in frame.iterrows():
+        cells = []
+        for key, _label, formatter in columns:
+            cells.append(
+                "<td>"
+                + html.escape(formatter(row[key]))
+                + "</td>"
+            )
+        body_rows.append("<tr>" + "".join(cells) + "</tr>")
+    st.markdown(
+        (
+            '<div class="print-only"><table><thead><tr>'
+            + header
+            + "</tr></thead><tbody>"
+            + "".join(body_rows)
+            + "</tbody></table></div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
 def prepare_pdf_export() -> None:
     """Hide the navigation and filters when this page is printed.
 
     The browser print dialog is where the user saves the PDF.
-    Only the report body is included.
+    Only the report body is included. On-screen tables are
+    replaced by HTML tables the printer can draw.
     """
 
     st.markdown(
         """
         <style>
+        .print-only { display: none; }
         @media print {
           [data-testid="stSidebar"],
           [data-testid="stHeader"],
@@ -896,24 +985,45 @@ def prepare_pdf_export() -> None:
           [data-testid="stDecoration"],
           [data-testid="stSidebarCollapsedControl"],
           [data-testid="stBottom"],
+          [data-testid="stDataFrame"],
           .st-key-export_weekly_pdf,
           iframe {
             display: none !important;
           }
+          .print-only { display: block !important; }
           [data-testid="stAppViewContainer"],
           [data-testid="stMain"],
           [data-testid="stMainBlockContainer"],
+          .block-container,
           .main {
             margin: 0 !important;
             padding-left: 0 !important;
+            padding-right: 0 !important;
             width: 100% !important;
-            max-width: 100% !important;
+            max-width: none !important;
             position: static !important;
+          }
+          .print-only table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 10px;
+          }
+          .print-only th,
+          .print-only td {
+            border-bottom: 1px solid #ccc;
+            padding: 4px 6px;
+            text-align: right;
+            white-space: nowrap;
+          }
+          .print-only th:first-child,
+          .print-only td:first-child {
+            text-align: left;
           }
           * {
             -webkit-print-color-adjust: exact !important;
             print-color-adjust: exact !important;
           }
+          @page { size: landscape; margin: 0.45in; }
         }
         </style>
         """,
@@ -927,10 +1037,6 @@ def export_pdf_button() -> None:
     export_pdf = st.button(
         "Export PDF",
         key="export_weekly_pdf",
-        help=(
-            "Opens the print dialog. Choose Save as PDF. "
-            "The view list and filters are left out."
-        ),
     )
     if export_pdf:
         components.html(
@@ -1169,6 +1275,31 @@ st.dataframe(
     width="content",
     height=table_height(len(comparison)),
 )
+print_table(
+    comparison[display_columns],
+    [
+        ("location", "Store", _print_text),
+        ("day_net_sales", "Net sales (day)", _print_money(0)),
+        ("week_net_sales", "Net sales (week)", _print_money(0)),
+        ("annualized", "Annualized", _print_money(0)),
+        (
+            "day_labor_percent",
+            "Labor % (day)",
+            _print_percent(1),
+        ),
+        (
+            "week_labor_percent",
+            "Labor % (week)",
+            _print_percent(1),
+        ),
+        ("day_splh", "SpLH (day)", _print_money(2)),
+        ("week_splh", "SpLH (week)", _print_money(2)),
+        ("day_lane", "Drive-thru (day)", _print_text),
+        ("week_lane", "Drive-thru (week)", _print_text),
+        ("day_ot_hours", "OT hours (day)", _print_number(1)),
+        ("week_ot_hours", "OT hours (week)", _print_number(1)),
+    ],
+)
 
 week_sales = in_window(sales_daily, week_start, week_end)
 recorded_days = (
@@ -1209,6 +1340,18 @@ st.dataframe(
     hide_index=True,
     width="content",
     height=table_height(len(leaderboard)),
+)
+print_table(
+    leaderboard[leaderboard_columns],
+    [
+        ("rank", "#", _print_number(0)),
+        ("location", "Store", _print_text),
+        ("week_review_score", "Week avg", _print_number(2)),
+        ("week_review_count", "Week", _print_number(0)),
+        ("day_review_score", "Day avg", _print_number(2)),
+        ("day_review_count", "Day", _print_number(0)),
+        ("current_review_score", "Current", _print_number(2)),
+    ],
 )
 st.caption(
     "Ranked by average score for these 7 days, highest "

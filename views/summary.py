@@ -562,6 +562,34 @@ def sales_pie(week: pd.DataFrame) -> alt.Chart | None:
     return (arcs + labels).properties(width=420, height=420)
 
 
+def review_leaderboard(comparison: pd.DataFrame) -> pd.DataFrame:
+    """Stores ranked by this week's average Google review score.
+
+    A store with no reviews this week stays at the bottom.
+    The pooled All stores row is left out of the ranking.
+    """
+
+    columns = [
+        "location",
+        "week_review_score",
+        "week_review_count",
+        "day_review_score",
+        "day_review_count",
+        "current_review_score",
+    ]
+    stores = comparison.loc[comparison["row_key"] != "ALL"].copy()
+    if stores.empty:
+        return pd.DataFrame(columns=["rank", *columns])
+
+    stores = stores.sort_values(
+        ["week_review_score", "week_review_count", "location"],
+        ascending=[False, False, True],
+        na_position="last",
+    )
+    stores.insert(0, "rank", range(1, len(stores) + 1))
+    return stores[["rank", *columns]].reset_index(drop=True)
+
+
 def _review_rollup(frame: pd.DataFrame) -> pd.DataFrame:
     """Review count and average rating for each store."""
 
@@ -676,6 +704,11 @@ def summary_column_config() -> dict:
     """Headers for the store comparison table."""
 
     return {
+        "rank": st.column_config.NumberColumn(
+            "Rank",
+            format="%d",
+            width="small",
+        ),
         "location": st.column_config.TextColumn("Store", width="medium"),
         "day_net_sales": st.column_config.NumberColumn(
             "Net sales (day)",
@@ -988,18 +1021,52 @@ comparison = comparison.merge(
     how="left",
 )
 
-st.subheader("Week net sales by store")
-pie = sales_pie(week_metrics)
-if pie is None:
-    st.info("No store recorded net sales in this week.")
-else:
-    st.altair_chart(pie, use_container_width=False)
+chart_column, leaderboard_column = st.columns(
+    [1.35, 1],
+    gap="large",
+    vertical_alignment="top",
+)
+
+with chart_column:
+    st.subheader("Week net sales by store")
+    pie = sales_pie(week_metrics)
+    if pie is None:
+        st.info("No store recorded net sales in this week.")
+    else:
+        st.altair_chart(pie, use_container_width=False)
+        st.caption(
+            "Each slice is one store's net sales for these 7 days. "
+            "The percentage is drawn on the slice, and again "
+            "beside the store name. A slice under "
+            f"{SLICE_LABEL_MIN_SHARE * 100:.1f}% keeps the "
+            "percentage in the legend so the labels stay apart."
+        )
+
+leaderboard = review_leaderboard(comparison)
+leaderboard_columns = [
+    "rank",
+    "location",
+    "week_review_score",
+    "week_review_count",
+    "day_review_score",
+    "day_review_count",
+    "current_review_score",
+]
+with leaderboard_column:
+    st.subheader("Review leaderboard")
+    st.dataframe(
+        leaderboard[leaderboard_columns],
+        column_config=summary_column_config(),
+        hide_index=True,
+        use_container_width=True,
+        height=table_height(len(leaderboard)),
+    )
     st.caption(
-        "Each slice is one store's net sales for these 7 days. "
-        "The percentage is drawn on the slice, and again "
-        "beside the store name. A slice under "
-        f"{SLICE_LABEL_MIN_SHARE * 100:.1f}% keeps the "
-        "percentage in the legend so the labels stay apart."
+        "Ranked by average score for these 7 days, highest "
+        "first. A store with no reviews this week is listed "
+        "at the bottom. Reviews (day) use the selected date. "
+        "Current score is the average of every Google review "
+        "stored for the store."
     )
 
 display_columns = [
@@ -1015,11 +1082,6 @@ display_columns = [
     "week_lane",
     "day_ot_hours",
     "week_ot_hours",
-    "day_review_count",
-    "day_review_score",
-    "week_review_count",
-    "week_review_score",
-    "current_review_score",
 ]
 st.subheader(
     f"{day:%A, %b %d, %Y}  ·  "
@@ -1051,11 +1113,6 @@ st.caption(
     "SpLH is net sales divided by hourly labor hours, with "
     "salaried roles such as GM left out of the hours. "
     "Drive-thru time is the car-weighted average lane time. "
-    "OT hours leave out the GM role. Review counts are "
-    "Google reviews posted that day or during those 7 days, "
-    "and the average score is the average of those star "
-    "ratings. "
-    "Current score is the average of every review stored "
-    "for the store. All stores adds the stores together, "
-    "then divides."
+    "OT hours leave out the GM role. All stores adds the "
+    "stores together, then divides."
 )

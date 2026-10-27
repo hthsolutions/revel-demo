@@ -694,22 +694,17 @@ def review_metrics(
 
 
 def leaderboard_column_config() -> dict:
-    """Narrow headers so the leaderboard fits beside the pie."""
+    """Headers for the review leaderboard. Columns size to their content."""
 
     return {
         "rank": st.column_config.NumberColumn(
             "#",
             format="%d",
-            width="small",
         ),
-        "location": st.column_config.TextColumn(
-            "Store",
-            width=128,
-        ),
+        "location": st.column_config.TextColumn("Store"),
         "week_review_score": st.column_config.NumberColumn(
             "Week avg",
             format="%.2f",
-            width="small",
             help=(
                 "Average star rating of the reviews "
                 "posted during those 7 days."
@@ -718,13 +713,11 @@ def leaderboard_column_config() -> dict:
         "week_review_count": st.column_config.NumberColumn(
             "Week",
             format="%.0f",
-            width="small",
             help="Google reviews posted during those 7 days.",
         ),
         "day_review_score": st.column_config.NumberColumn(
             "Day avg",
             format="%.2f",
-            width="small",
             help=(
                 "Average star rating of the reviews posted "
                 "on the selected date."
@@ -733,13 +726,11 @@ def leaderboard_column_config() -> dict:
         "day_review_count": st.column_config.NumberColumn(
             "Day",
             format="%.0f",
-            width="small",
             help="Google reviews posted on the selected business date.",
         ),
         "current_review_score": st.column_config.NumberColumn(
             "Current",
             format="%.2f",
-            width="small",
             help=(
                 "Average star rating of every Google review "
                 "stored for this store."
@@ -762,9 +753,8 @@ def summary_column_config() -> dict:
         "rank": st.column_config.NumberColumn(
             "Rank",
             format="%d",
-            width="small",
         ),
-        "location": st.column_config.TextColumn("Store", width="medium"),
+        "location": st.column_config.TextColumn("Store"),
         "day_net_sales": st.column_config.NumberColumn(
             "Net sales (day)",
             format="$%,.0f",
@@ -1113,7 +1103,7 @@ with leaderboard_column:
         leaderboard[leaderboard_columns],
         column_config=leaderboard_column_config(),
         hide_index=True,
-        use_container_width=True,
+        width="content",
         height=table_height(len(leaderboard)),
     )
     st.caption(
@@ -1146,7 +1136,7 @@ st.dataframe(
     comparison[display_columns],
     column_config=summary_column_config(),
     hide_index=True,
-    use_container_width=True,
+    width="content",
     height=table_height(len(comparison)),
 )
 

@@ -549,9 +549,9 @@ def sales_pie(week: pd.DataFrame) -> alt.Chart | None:
             sort=order,
             scale=alt.Scale(domain=order, scheme="category20"),
             legend=alt.Legend(
-                orient="bottom",
-                columns=2,
-                labelLimit=180,
+                orient="right",
+                columns=1,
+                labelLimit=280,
             ),
         ),
     )
@@ -559,7 +559,7 @@ def sales_pie(week: pd.DataFrame) -> alt.Chart | None:
         text="slice_label:N",
         color=alt.value("#1f2933"),
     )
-    return (arcs + labels).properties(width=340, height=340)
+    return (arcs + labels).properties(width=420, height=420)
 
 
 def review_leaderboard(comparison: pd.DataFrame) -> pd.DataFrame:
@@ -1066,52 +1066,21 @@ comparison = comparison.merge(
     how="left",
 )
 
-chart_column, leaderboard_column = st.columns(
-    [1, 1.35],
-    gap="medium",
-    vertical_alignment="top",
+st.subheader(
+    f"{day:%A, %b %d, %Y}  ·  "
+    f"Trailing 7 days, {format_week_range(week_start, week_end)}"
 )
-
-with chart_column:
-    st.subheader("Week net sales by store")
-    pie = sales_pie(week_metrics)
-    if pie is None:
-        st.info("No store recorded net sales in this week.")
-    else:
-        st.altair_chart(pie, use_container_width=False)
-        st.caption(
-            "Each slice is one store's net sales for these 7 days. "
-            "The percentage is drawn on the slice, and again "
-            "beside the store name. A slice under "
-            f"{SLICE_LABEL_MIN_SHARE * 100:.1f}% keeps the "
-            "percentage in the legend so the labels stay apart."
-        )
-
-leaderboard = review_leaderboard(comparison)
-leaderboard_columns = [
-    "rank",
-    "location",
-    "week_review_score",
-    "week_review_count",
-    "day_review_score",
-    "day_review_count",
-    "current_review_score",
-]
-with leaderboard_column:
-    st.subheader("Review leaderboard")
-    st.dataframe(
-        leaderboard[leaderboard_columns],
-        column_config=leaderboard_column_config(),
-        hide_index=True,
-        width="content",
-        height=table_height(len(leaderboard)),
-    )
+pie = sales_pie(week_metrics)
+if pie is None:
+    st.info("No store recorded net sales in this week.")
+else:
+    st.altair_chart(pie, use_container_width=False)
     st.caption(
-        "Ranked by average score for these 7 days, highest "
-        "first. A store with no reviews this week is listed "
-        "at the bottom. Reviews (day) use the selected date. "
-        "Current score is the average of every Google review "
-        "stored for the store."
+        "Each slice is one store's net sales for these 7 days. "
+        "The percentage is drawn on the slice, and again "
+        "beside the store name. A slice under "
+        f"{SLICE_LABEL_MIN_SHARE * 100:.1f}% keeps the "
+        "percentage in the legend so the labels stay apart."
     )
 
 display_columns = [
@@ -1128,10 +1097,7 @@ display_columns = [
     "day_ot_hours",
     "week_ot_hours",
 ]
-st.subheader(
-    f"{day:%A, %b %d, %Y}  ·  "
-    f"Trailing 7 days, {format_week_range(week_start, week_end)}"
-)
+st.subheader("Sales and Labor Performance")
 st.dataframe(
     comparison[display_columns],
     column_config=summary_column_config(),
@@ -1160,4 +1126,30 @@ st.caption(
     "Drive-thru time is the car-weighted average lane time. "
     "OT hours leave out the GM role. All stores adds the "
     "stores together, then divides."
+)
+
+leaderboard = review_leaderboard(comparison)
+leaderboard_columns = [
+    "rank",
+    "location",
+    "week_review_score",
+    "week_review_count",
+    "day_review_score",
+    "day_review_count",
+    "current_review_score",
+]
+st.subheader("Review leaderboard")
+st.dataframe(
+    leaderboard[leaderboard_columns],
+    column_config=leaderboard_column_config(),
+    hide_index=True,
+    width="content",
+    height=table_height(len(leaderboard)),
+)
+st.caption(
+    "Ranked by average score for these 7 days, highest "
+    "first. A store with no reviews this week is listed "
+    "at the bottom. Reviews (day) use the selected date. "
+    "Current score is the average of every Google review "
+    "stored for the store."
 )

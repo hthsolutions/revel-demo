@@ -559,7 +559,9 @@ def sales_pie(week: pd.DataFrame) -> alt.Chart | None:
         text="slice_label:N",
         color=alt.value("#1f2933"),
     )
-    return (arcs + labels).properties(width=420, height=420)
+    # Room around the ring so a percent on the left
+    # is drawn in full, next to the legend.
+    return (arcs + labels).properties(width=560, height=480)
 
 
 def review_leaderboard(comparison: pd.DataFrame) -> pd.DataFrame:
@@ -1074,6 +1076,19 @@ pie = sales_pie(week_metrics)
 if pie is None:
     st.info("No store recorded net sales in this week.")
 else:
+    st.markdown(
+        """
+        <style>
+        [data-testid="stFullScreenFrame"]:has(
+            [data-testid="stVegaLiteChart"]
+        ) {
+            display: flex;
+            justify-content: center;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     st.altair_chart(pie, use_container_width=False)
     st.caption(
         "Each slice is one store's net sales for these 7 days. "

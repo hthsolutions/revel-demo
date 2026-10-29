@@ -806,7 +806,7 @@ def summary_column_config(business_date) -> dict:
         ),
         "location": st.column_config.TextColumn("Store"),
         "day_net_sales": st.column_config.NumberColumn(
-            f"Net sales ({day_label})",
+            f"Net sales (Day)",
             format="$%,.0f",
             help="Net sales on the selected business date.",
         ),
@@ -819,7 +819,7 @@ def summary_column_config(business_date) -> dict:
             ),
         ),
         "week_net_sales_growth": st.column_config.NumberColumn(
-            "Net sales (week growth %)",
+            "Weekly Growth %",
             format="%.1f%%",
             help=(
                 "Percent change in net sales versus "

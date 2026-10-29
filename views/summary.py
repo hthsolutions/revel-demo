@@ -615,13 +615,16 @@ def review_leaderboard(comparison: pd.DataFrame) -> pd.DataFrame:
     """Stores ranked by this week's average Google review score.
 
     A store with no reviews this week stays at the bottom.
-    The pooled All stores row is left out of the ranking.
+    All stores follows the ranking. Its scores pool every
+    review instead of averaging the store averages.
     """
 
     columns = [
         "location",
         "week_review_score",
+        "week_review_score_change",
         "week_review_count",
+        "week_review_count_change",
         "day_review_score",
         "day_review_count",
         "current_review_score",
@@ -634,9 +637,22 @@ def review_leaderboard(comparison: pd.DataFrame) -> pd.DataFrame:
         ["week_review_score", "week_review_count", "location"],
         ascending=[False, False, True],
         na_position="last",
-    )
+    ).reset_index(drop=True)
     stores.insert(0, "rank", range(1, len(stores) + 1))
-    return stores[["rank", *columns]].reset_index(drop=True)
+    ranked = stores[["rank", *columns]]
+
+    totals = comparison.loc[
+        comparison["row_key"].eq("ALL"),
+        columns,
+    ]
+    if totals.empty:
+        return ranked
+
+    total_row = totals.iloc[:1].copy()
+    total_row["rank"] = pd.NA
+    board = pd.concat([ranked, total_row], ignore_index=True)
+    board["rank"] = board["rank"].astype("Int64")
+    return board[["rank", *columns]]
 
 
 def _review_rollup(frame: pd.DataFrame) -> pd.DataFrame:
@@ -679,7 +695,12 @@ def review_metrics(
     week_end,
     reviews_loaded: bool,
 ) -> pd.DataFrame:
-    """Day, week, and lifetime Google review figures for each store."""
+    """Day, week, and lifetime Google review figures for each store.
+
+    Week change is this 7-day window minus the 7 days
+    before it. The average change stays blank when either
+    window has no scored reviews.
+    """
 
     result = pd.DataFrame(
         {
@@ -693,18 +714,27 @@ def review_metrics(
         for column in (
             "day_review_count",
             "week_review_count",
+            "week_review_count_change",
             "day_review_score",
             "week_review_score",
+            "week_review_score_change",
             "current_review_score",
         ):
             result[column] = float("nan")
         return result
 
+    week_start = pd.Timestamp(week_start)
+    week_end = pd.Timestamp(week_end)
+    span_days = (week_end - week_start).days
+    prior_end = week_start - pd.Timedelta(days=1)
+    prior_start = prior_end - pd.Timedelta(days=span_days)
     day_rows = in_window(reviews, day, day)
     week_rows = in_window(reviews, week_start, week_end)
+    prior_rows = in_window(reviews, prior_start, prior_end)
     pieces = {
         "day": _review_rollup(day_rows),
         "week": _review_rollup(week_rows),
+        "prior": _review_rollup(prior_rows),
         "current": _review_rollup(reviews),
     }
     for label, rolled in pieces.items():
@@ -734,12 +764,25 @@ def review_metrics(
     result.loc[all_rows, "day_review_score"] = _review_average(day_rows)
     result.loc[all_rows, "week_review_count"] = float(len(week_rows))
     result.loc[all_rows, "week_review_score"] = _review_average(week_rows)
+    result.loc[all_rows, "prior_review_count"] = float(len(prior_rows))
+    result.loc[all_rows, "prior_review_score"] = _review_average(
+        prior_rows
+    )
     result.loc[all_rows, "current_review_score"] = _review_average(
         reviews
     )
     result["day_review_count"] = result["day_review_count"].fillna(0)
     result["week_review_count"] = result["week_review_count"].fillna(0)
-    return result
+    result["prior_review_count"] = result["prior_review_count"].fillna(0)
+    result["week_review_count_change"] = (
+        result["week_review_count"] - result["prior_review_count"]
+    )
+    result["week_review_score_change"] = (
+        result["week_review_score"] - result["prior_review_score"]
+    )
+    return result.drop(
+        columns=["prior_review_count", "prior_review_score"]
+    )
 
 
 def leaderboard_column_config() -> dict:
@@ -759,10 +802,27 @@ def leaderboard_column_config() -> dict:
                 "posted during those 7 days."
             ),
         ),
+        "week_review_score_change": st.column_config.NumberColumn(
+            "Week avg (Change +/-)",
+            format="%+.2f",
+            help=(
+                "This week's average minus the average "
+                "for the previous 7 days. Blank when "
+                "either week has no scored reviews."
+            ),
+        ),
         "week_review_count": st.column_config.NumberColumn(
             "Week",
             format="%.0f",
             help="Google reviews posted during those 7 days.",
+        ),
+        "week_review_count_change": st.column_config.NumberColumn(
+            "Week (change +/-)",
+            format="%+.0f",
+            help=(
+                "This week's review count minus the count "
+                "for the previous 7 days."
+            ),
         ),
         "day_review_score": st.column_config.NumberColumn(
             "Day avg",
@@ -1217,7 +1277,9 @@ leaderboard_columns = [
     "rank",
     "location",
     "week_review_score",
+    "week_review_score_change",
     "week_review_count",
+    "week_review_count_change",
     "day_review_score",
     "day_review_count",
     "current_review_score",
@@ -1233,7 +1295,9 @@ st.dataframe(
 st.caption(
     "Ranked by average score for these 7 days, highest "
     "first. A store with no reviews this week is listed "
-    "at the bottom. Reviews (day) use the selected date. "
+    "at the bottom. All stores pools every review across "
+    "stores. Week change columns are this week minus the "
+    "previous 7 days. Reviews (day) use the selected date. "
     "Current score is the average of every Google review "
     "stored for the store."
 )

@@ -13,6 +13,7 @@ from revel_data import (
     load_salary_data,
     load_sales_data,
     load_shift_data,
+    percent_change,
     rollup_drive_thru_times,
 )
 
@@ -501,6 +502,52 @@ def combine_periods(
     )
 
 
+def week_net_sales_growth(
+    week: pd.DataFrame,
+    sales_daily: pd.DataFrame,
+    week_start,
+    week_end,
+) -> pd.DataFrame:
+    """Percent change in net sales versus the previous 7 days.
+
+    The All stores row compares the two pooled totals.
+    A store with no sales in the previous window stays blank.
+    """
+
+    week_start = pd.Timestamp(week_start)
+    week_end = pd.Timestamp(week_end)
+    span_days = (week_end - week_start).days
+    prior_end = week_start - pd.Timedelta(days=1)
+    prior_start = prior_end - pd.Timedelta(days=span_days)
+    prior = sum_by_store(
+        sales_daily,
+        "net_sales",
+        prior_start,
+        prior_end,
+    ).rename(
+        columns={
+            "location_key": "row_key",
+            "net_sales": "prior_week_net_sales",
+        }
+    )
+    current = week[["row_key", "net_sales"]].rename(
+        columns={"net_sales": "week_net_sales"}
+    )
+    merged = current.merge(prior, on="row_key", how="left")
+    store_rows = merged["row_key"].ne("ALL")
+    merged.loc[~store_rows, "prior_week_net_sales"] = _total(
+        merged.loc[store_rows, "prior_week_net_sales"]
+    )
+    merged["week_net_sales_growth"] = [
+        percent_change(current_sales, prior_sales)
+        for current_sales, prior_sales in zip(
+            merged["week_net_sales"],
+            merged["prior_week_net_sales"],
+        )
+    ]
+    return merged[["row_key", "week_net_sales_growth"]]
+
+
 def sales_pie(week: pd.DataFrame) -> alt.Chart | None:
     """Week net sales, one slice per store, labeled with its share."""
 
@@ -748,9 +795,10 @@ def table_height(row_count: int) -> int:
     return 48 + 36 * visible
 
 
-def summary_column_config() -> dict:
+def summary_column_config(business_date) -> dict:
     """Headers for the store comparison table."""
 
+    day_label = pd.Timestamp(business_date).strftime("%b %d, %Y")
     return {
         "rank": st.column_config.NumberColumn(
             "Rank",
@@ -758,7 +806,7 @@ def summary_column_config() -> dict:
         ),
         "location": st.column_config.TextColumn("Store"),
         "day_net_sales": st.column_config.NumberColumn(
-            "Net sales (day)",
+            f"Net sales ({day_label})",
             format="$%,.0f",
             help="Net sales on the selected business date.",
         ),
@@ -768,6 +816,14 @@ def summary_column_config() -> dict:
             help=(
                 "Net sales for the 7 days ending on "
                 "the selected date."
+            ),
+        ),
+        "week_net_sales_growth": st.column_config.NumberColumn(
+            "Net sales (week growth %)",
+            format="%.1f%%",
+            help=(
+                "Percent change in net sales versus "
+                "the previous 7 days."
             ),
         ),
         "annualized": st.column_config.NumberColumn(
@@ -1056,6 +1112,16 @@ week_metrics = store_window(
 )
 comparison = combine_periods(day_metrics, week_metrics)
 comparison = comparison.merge(
+    week_net_sales_growth(
+        week_metrics,
+        sales_daily,
+        week_start,
+        week_end,
+    ),
+    on="row_key",
+    how="left",
+)
+comparison = comparison.merge(
     review_metrics(
         review_df,
         stores,
@@ -1102,6 +1168,7 @@ display_columns = [
     "location",
     "day_net_sales",
     "week_net_sales",
+    "week_net_sales_growth",
     "annualized",
     "day_labor_percent",
     "week_labor_percent",
@@ -1115,7 +1182,7 @@ display_columns = [
 st.subheader("Sales and Labor Performance")
 st.dataframe(
     comparison[display_columns],
-    column_config=summary_column_config(),
+    column_config=summary_column_config(day),
     hide_index=True,
     width="content",
     height=table_height(len(comparison)),
@@ -1135,6 +1202,8 @@ if recorded_days < 7:
     )
 
 st.caption(
+    "Week growth % compares these 7 days with the 7 days "
+    "before them. "
     "Hourly labor % is shift wages divided by net sales. "
     "SpLH is net sales divided by hourly labor hours, with "
     "salaried roles such as GM left out of the hours. "

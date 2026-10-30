@@ -946,6 +946,34 @@ def assign_business_clock(dataframe: pd.DataFrame) -> pd.DataFrame:
     return dataframe
 
 
+def fill_missing_lane_total(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Fill a blank lane total from menu board, service, and queue.
+
+    A stored lane total is those three parts added together.
+    When the total is missing and any part was recorded, use
+    that sum so the car still counts. A blank part counts as
+    zero. A row with none of the parts is left blank.
+    """
+
+    parts = [
+        column
+        for column in ("menu_board", "service", "lane_queue")
+        if column in dataframe.columns
+    ]
+    if dataframe.empty or "lane_total" not in dataframe.columns or not parts:
+        return dataframe
+
+    dataframe = dataframe.copy()
+    recorded = dataframe[parts]
+    can_fill = (
+        dataframe["lane_total"].isna() & recorded.notna().any(axis=1)
+    )
+    dataframe.loc[can_fill, "lane_total"] = (
+        recorded.loc[can_fill].fillna(0).sum(axis=1)
+    )
+    return dataframe
+
+
 def rollup_drive_thru_times(
     frame: pd.DataFrame,
     group_columns: list[str],
@@ -1002,8 +1030,9 @@ def load_hme_departures() -> pd.DataFrame:
     """Retrieve HME drive-thru car departures from Supabase.
 
     One row is one car leaving the lane. Time columns are
-    seconds. total_cars is how many cars were still stacked
-    behind that departure, not a daily car count.
+    seconds. A blank lane total is filled from menu board +
+    service + lane queue. total_cars is how many cars were
+    still stacked behind that departure, not a daily car count.
     """
 
     dataframe = expand_daily_detail(HME_DAILY_VIEW, "departures")
@@ -1031,6 +1060,7 @@ def load_hme_departures() -> pd.DataFrame:
         dataframe,
         ["total_cars", *DRIVE_THRU_TIME_COLUMNS],
     )
+    dataframe = fill_missing_lane_total(dataframe)
     dataframe = dataframe.dropna(
         subset=["departure_time", "lane_total"]
     )

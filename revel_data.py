@@ -120,15 +120,28 @@ ROLE_ALIASES = {
     "SHIFT MANAGER": "Shift Manager",
 }
 
-# These match the labor-type charts: GM is purple and DM
-# is green. Any other role keeps one color from its name,
-# so a filtered chart cannot hand that role a new color.
+# GM and DM match the labor-type charts. AGM and Cook are
+# pinned because a name-based hue put both on the same red.
+# Every other role uses ROLE_COLOR_PALETTE, whose entries
+# sit in different color families.
 NAMED_ROLE_COLORS = {
     "GM": "#9467bd",
     "DM": "#2ca02c",
     "Shift Manager": "#1f77b4",
     "Unassigned": "#7f7f7f",
+    "AGM": "#e41a1c",
+    "Cook": "#17becf",
 }
+
+ROLE_COLOR_PALETTE = (
+    "#ff7f00",
+    "#e7298a",
+    "#b15928",
+    "#637939",
+    "#0c0ced",
+    "#0c57ed",
+    "#6f204a",
+)
 
 
 class MissingSecretError(RuntimeError):
@@ -276,43 +289,13 @@ def _coerce_numeric(
     return dataframe
 
 
-def _hsl_to_hex(hue: float, saturation: float, lightness: float) -> str:
-    """Turn an HSL color into a hex string.
-
-    Saturation and lightness are percentages from 0 to 100.
-    """
-
-    scaled_saturation = saturation / 100
-    scaled_lightness = lightness / 100
-    chroma = (1 - abs(2 * scaled_lightness - 1)) * scaled_saturation
-    hue_sector = (hue % 360) / 60
-    second = chroma * (1 - abs(hue_sector % 2 - 1))
-    match = scaled_lightness - chroma / 2
-    if hue_sector < 1:
-        red, green, blue = chroma, second, 0
-    elif hue_sector < 2:
-        red, green, blue = second, chroma, 0
-    elif hue_sector < 3:
-        red, green, blue = 0, chroma, second
-    elif hue_sector < 4:
-        red, green, blue = 0, second, chroma
-    elif hue_sector < 5:
-        red, green, blue = second, 0, chroma
-    else:
-        red, green, blue = chroma, 0, second
-
-    def channel(value: float) -> int:
-        return round((value + match) * 255)
-
-    return f"#{channel(red):02x}{channel(green):02x}{channel(blue):02x}"
-
-
 def role_color(role) -> str:
     """One color for a role name, the same on every chart.
 
     Matching ignores case. A blank name uses the Unassigned
-    color. Other roles take a hue from the name itself, so
-    the color does not depend on which roles share the chart.
+    color. Other roles take a slot in ROLE_COLOR_PALETTE
+    from the name itself, so the color does not depend on
+    which roles share the chart.
     """
 
     label = "" if role is None or pd.isna(role) else str(role).strip()
@@ -323,7 +306,7 @@ def role_color(role) -> str:
             return color
 
     digest = zlib.crc32(label.casefold().encode("utf-8"))
-    return _hsl_to_hex(digest % 360, 65, 46)
+    return ROLE_COLOR_PALETTE[digest % len(ROLE_COLOR_PALETTE)]
 
 
 def canonicalize_role(

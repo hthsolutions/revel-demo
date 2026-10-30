@@ -676,17 +676,16 @@ def review_leaderboard(comparison: pd.DataFrame) -> pd.DataFrame:
     ]
     stores = comparison.loc[comparison["row_key"] != "ALL"].copy()
     if stores.empty:
-        return pd.DataFrame(columns=["rank", *columns])
+        return pd.DataFrame(columns=columns)
 
     stores["_opening"] = stores["location"].map(opening_position)
     stores["_name"] = stores["location"].fillna("").astype(str).str.casefold()
-    stores = (
+    ranked = (
         stores.sort_values(["_opening", "_name"], kind="mergesort")
         .drop(columns=["_opening", "_name"])
         .reset_index(drop=True)
     )
-    stores.insert(0, "rank", range(1, len(stores) + 1))
-    ranked = stores[["rank", *columns]]
+    ranked = ranked[columns]
 
     totals = comparison.loc[
         comparison["row_key"].eq("ALL"),
@@ -695,11 +694,10 @@ def review_leaderboard(comparison: pd.DataFrame) -> pd.DataFrame:
     if totals.empty:
         return ranked
 
-    total_row = totals.iloc[:1].copy()
-    total_row["rank"] = pd.NA
-    board = pd.concat([ranked, total_row], ignore_index=True)
-    board["rank"] = board["rank"].astype("Int64")
-    return board[["rank", *columns]]
+    return pd.concat(
+        [ranked, totals.iloc[:1]],
+        ignore_index=True,
+    )
 
 
 def _review_rollup(frame: pd.DataFrame) -> pd.DataFrame:
@@ -836,10 +834,6 @@ def leaderboard_column_config() -> dict:
     """Headers for the review leaderboard. Columns size to their content."""
 
     return {
-        "rank": st.column_config.NumberColumn(
-            "#",
-            format="%d",
-        ),
         "location": st.column_config.TextColumn("Store"),
         "week_review_score": st.column_config.NumberColumn(
             "Week avg",
@@ -1386,7 +1380,6 @@ st.caption(
 
 leaderboard = review_leaderboard(comparison)
 leaderboard_columns = [
-    "rank",
     "location",
     "week_review_score",
     "week_review_score_change",

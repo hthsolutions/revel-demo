@@ -26,6 +26,37 @@ WEEKS_IN_YEAR = 52
 # of SpLH. GM overtime is also left out of OT hours.
 SALARIED_ROLES = {"GM", "DM"}
 
+# Store rows follow opening date. A store that is not in
+# this list sorts after Temple. All stores stays last.
+OPENING_ORDER = ("Marble Falls", "Lampasas", "Leander", "Temple")
+
+# Green at or under these cutoffs. Above them is red.
+HOURLY_LABOR_CUTOFF = 18.0
+LANE_GOAL_SECONDS = 4 * 60
+
+WITHIN_STYLE = (
+    "background-color: rgba(34, 139, 84, 0.18); color: #157347"
+)
+OVER_STYLE = (
+    "background-color: rgba(180, 35, 24, 0.16); color: #b42318"
+)
+
+PERFORMANCE_COLUMNS = [
+    "location",
+    "day_net_sales",
+    "week_net_sales",
+    "week_net_sales_growth",
+    "annualized",
+    "day_labor_percent",
+    "week_labor_percent",
+    "day_splh",
+    "week_splh",
+    "day_lane",
+    "week_lane",
+    "day_ot_hours",
+    "week_ot_hours",
+]
+
 # Slices smaller than this keep their percent in the
 # legend only, so 15 labels can still be read.
 SLICE_LABEL_MIN_SHARE = 0.035
@@ -52,6 +83,16 @@ def format_week_range(start, end) -> str:
     if start.year == end.year:
         return f"{start:%b %d} – {end:%b %d, %Y}"
     return f"{start:%b %d, %Y} – {end:%b %d, %Y}"
+
+
+def opening_position(name) -> int:
+    """Earlier stores opened first. An unknown store sorts after Temple."""
+
+    folded = str(name).casefold().strip()
+    for index, store in enumerate(OPENING_ORDER):
+        if folded == store.casefold():
+            return index
+    return len(OPENING_ORDER)
 
 
 def preferred_location(names: pd.Series) -> str:
@@ -151,10 +192,13 @@ def store_catalog(*frames: pd.DataFrame) -> pd.DataFrame:
         .groupby("location_key", as_index=False)["location"]
         .agg(preferred_location)
     )
-    return listed.sort_values(
-        "location",
-        key=lambda series: series.str.lower(),
-    ).reset_index(drop=True)
+    listed["_opening"] = listed["location"].map(opening_position)
+    listed["_name"] = listed["location"].astype(str).str.casefold()
+    return (
+        listed.sort_values(["_opening", "_name"], kind="mergesort")
+        .drop(columns=["_opening", "_name"])
+        .reset_index(drop=True)
+    )
 
 
 def in_window(
@@ -448,6 +492,7 @@ def combine_periods(
             "hourly_percent": "day_labor_percent",
             "splh": "day_splh",
             "lane_label": "day_lane",
+            "lane_total": "day_lane_seconds",
             "ot_hours": "day_ot_hours",
         }
     )
@@ -458,6 +503,7 @@ def combine_periods(
             "hourly_percent": "week_labor_percent",
             "splh": "week_splh",
             "lane_label": "week_lane",
+            "lane_total": "week_lane_seconds",
             "ot_hours": "week_ot_hours",
         }
     )
@@ -469,6 +515,7 @@ def combine_periods(
             "day_labor_percent",
             "day_splh",
             "day_lane",
+            "day_lane_seconds",
             "day_ot_hours",
         ]
     ].merge(
@@ -480,6 +527,7 @@ def combine_periods(
                 "week_labor_percent",
                 "week_splh",
                 "week_lane",
+                "week_lane_seconds",
                 "week_ot_hours",
             ]
         ],
@@ -487,17 +535,15 @@ def combine_periods(
         how="outer",
     )
     merged["_all"] = merged["row_key"].eq("ALL").astype(int)
+    merged["_opening"] = merged["location"].map(opening_position)
+    merged["_name"] = merged["location"].fillna("").astype(str).str.casefold()
     return (
         merged
         .sort_values(
-            ["_all", "location"],
-            key=lambda column: (
-                column.str.lower()
-                if column.dtype == object
-                else column
-            ),
+            ["_all", "_opening", "_name"],
+            kind="mergesort",
         )
-        .drop(columns="_all")
+        .drop(columns=["_all", "_opening", "_name"])
         .reset_index(drop=True)
     )
 
@@ -612,10 +658,9 @@ def sales_pie(week: pd.DataFrame) -> alt.Chart | None:
 
 
 def review_leaderboard(comparison: pd.DataFrame) -> pd.DataFrame:
-    """Stores ranked by this week's average Google review score.
+    """Stores in opening order, then any other store by name.
 
-    A store with no reviews this week stays at the bottom.
-    All stores follows the ranking. Its scores pool every
+    All stores follows the list. Its scores pool every
     review instead of averaging the store averages.
     """
 
@@ -633,11 +678,13 @@ def review_leaderboard(comparison: pd.DataFrame) -> pd.DataFrame:
     if stores.empty:
         return pd.DataFrame(columns=["rank", *columns])
 
-    stores = stores.sort_values(
-        ["week_review_score", "week_review_count", "location"],
-        ascending=[False, False, True],
-        na_position="last",
-    ).reset_index(drop=True)
+    stores["_opening"] = stores["location"].map(opening_position)
+    stores["_name"] = stores["location"].fillna("").astype(str).str.casefold()
+    stores = (
+        stores.sort_values(["_opening", "_name"], kind="mergesort")
+        .drop(columns=["_opening", "_name"])
+        .reset_index(drop=True)
+    )
     stores.insert(0, "rank", range(1, len(stores) + 1))
     ranked = stores[["rank", *columns]]
 
@@ -883,7 +930,8 @@ def summary_column_config(business_date) -> dict:
             format="%.1f%%",
             help=(
                 "Percent change in net sales versus "
-                "the previous 7 days."
+                "the previous 7 days. Green when zero "
+                "or positive, red when negative."
             ),
         ),
         "annualized": st.column_config.NumberColumn(
@@ -894,15 +942,20 @@ def summary_column_config(business_date) -> dict:
             ),
         ),
         "day_labor_percent": st.column_config.NumberColumn(
-            "Labor % (day)",
-            format="%.1f%%",
-            help="Shift wages divided by that day's net sales.",
-        ),
-        "week_labor_percent": st.column_config.NumberColumn(
-            "Labor % (week)",
+            "Hr Labor % (day)",
             format="%.1f%%",
             help=(
-                "Shift wages divided by net sales for those 7 days."
+                "Hourly shift wages divided by that day's "
+                "net sales. Green at 18% or under, red above 18%."
+            ),
+        ),
+        "week_labor_percent": st.column_config.NumberColumn(
+            "Hr Labor % (week)",
+            format="%.1f%%",
+            help=(
+                "Hourly shift wages divided by net sales "
+                "for those 7 days. Green at 18% or under, "
+                "red above 18%."
             ),
         ),
         "day_splh": st.column_config.NumberColumn(
@@ -925,12 +978,16 @@ def summary_column_config(business_date) -> dict:
         ),
         "day_lane": st.column_config.TextColumn(
             "Drive-thru (day)",
-            help="Car-weighted average lane time that day.",
+            help=(
+                "Car-weighted average lane time that day. "
+                "Green at 4:00 or under, red above 4:00."
+            ),
         ),
         "week_lane": st.column_config.TextColumn(
             "Drive-thru (week)",
             help=(
-                "Car-weighted average lane time over those 7 days."
+                "Car-weighted average lane time over those "
+                "7 days. Green at 4:00 or under, red above 4:00."
             ),
         ),
         "day_ot_hours": st.column_config.NumberColumn(
@@ -981,6 +1038,70 @@ def summary_column_config(business_date) -> dict:
             ),
         ),
     }
+
+
+def _paint(value, favorable: bool) -> str:
+    """Green or red, with a blank cell left uncolored."""
+
+    if value is None or pd.isna(value):
+        return ""
+    return WITHIN_STYLE if favorable else OVER_STYLE
+
+
+def _labor_style(value) -> str:
+    """Hourly labor is green at 18% or under."""
+
+    return _paint(
+        value,
+        pd.notna(value) and float(value) <= HOURLY_LABOR_CUTOFF,
+    )
+
+
+def _growth_style(value) -> str:
+    """Weekly growth is green when it is zero or positive."""
+
+    return _paint(value, pd.notna(value) and float(value) >= 0)
+
+
+def _lane_styles(seconds: pd.Series):
+    """Color the clock the table shows, not the unrounded seconds."""
+
+    def apply_column(series: pd.Series) -> list[str]:
+        paints = []
+        for index in series.index:
+            raw = seconds.loc[index]
+            if raw is None or pd.isna(raw):
+                paints.append("")
+                continue
+            shown = int(round(float(raw)))
+            paints.append(_paint(shown, shown <= LANE_GOAL_SECONDS))
+        return paints
+
+    return apply_column
+
+
+def style_performance(frame: pd.DataFrame):
+    """Color hourly labor, drive-thru time, and weekly growth."""
+
+    display = frame[PERFORMANCE_COLUMNS]
+    styler = display.style.map(
+        _labor_style,
+        subset=["day_labor_percent", "week_labor_percent"],
+    )
+    styler = styler.map(
+        _growth_style,
+        subset=["week_net_sales_growth"],
+    )
+    styler = styler.apply(
+        _lane_styles(frame["day_lane_seconds"]),
+        subset=["day_lane"],
+        axis=0,
+    )
+    return styler.apply(
+        _lane_styles(frame["week_lane_seconds"]),
+        subset=["week_lane"],
+        axis=0,
+    )
 
 
 def default_summary_date(min_date, max_date):
@@ -1224,24 +1345,9 @@ else:
         "percentage in the legend so the labels stay apart."
     )
 
-display_columns = [
-    "location",
-    "day_net_sales",
-    "week_net_sales",
-    "week_net_sales_growth",
-    "annualized",
-    "day_labor_percent",
-    "week_labor_percent",
-    "day_splh",
-    "week_splh",
-    "day_lane",
-    "week_lane",
-    "day_ot_hours",
-    "week_ot_hours",
-]
 st.subheader("Sales and Labor Performance")
 st.dataframe(
-    comparison[display_columns],
+    style_performance(comparison),
     column_config=summary_column_config(day),
     hide_index=True,
     width="content",
@@ -1262,12 +1368,18 @@ if recorded_days < 7:
     )
 
 st.caption(
-    "Week growth % compares these 7 days with the 7 days "
-    "before them. "
-    "Hourly labor % is shift wages divided by net sales. "
+    "Stores follow opening order: Marble Falls, Lampasas, "
+    "Leander, then Temple. "
+    "Weekly growth % compares these 7 days with the 7 days "
+    "before them. Zero or positive growth is green, and "
+    "negative growth is red. "
+    "Hr labor % is hourly shift wages divided by net sales. "
+    "18% or under is green, and above 18% is red. "
     "SpLH is net sales divided by hourly labor hours, with "
     "salaried roles such as GM left out of the hours. "
     "Drive-thru time is the car-weighted average lane time. "
+    "4:00 or under is green, and above 4:00 is red. "
+    "A blank cell stays uncolored. "
     "OT hours leave out the GM role. All stores adds the "
     "stores together, then divides."
 )
@@ -1293,11 +1405,10 @@ st.dataframe(
     height=table_height(len(leaderboard)),
 )
 st.caption(
-    "Ranked by average score for these 7 days, highest "
-    "first. A store with no reviews this week is listed "
-    "at the bottom. All stores pools every review across "
-    "stores. Week change columns are this week minus the "
-    "previous 7 days. Reviews (day) use the selected date. "
-    "Current score is the average of every Google review "
-    "stored for the store."
+    "Stores follow opening order: Marble Falls, Lampasas, "
+    "Leander, then Temple. All stores pools every review "
+    "across stores. Week change columns are this week "
+    "minus the previous 7 days. Reviews (day) use the "
+    "selected date. Current score is the average of every "
+    "Google review stored for the store."
 )

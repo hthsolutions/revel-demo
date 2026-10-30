@@ -13,20 +13,15 @@ from revel_data import (
 )
 
 
-# Store profit margin, in percent points. A month that
-# lands on both cutoffs keeps this margin.
-STORE_MARGIN_PERCENT = {
-    "LEANDER": 17.0,
-    "MARBLE FALLS": 7.0,
-    "LAMPASAS": 7.0,
-    "TEMPLE": 22.0,
-}
-
-# Shown first when several stores share a chart.
+# Shown first in the store picker.
 STORE_ORDER = ["Leander", "Marble Falls", "Lampasas", "Temple"]
 
 HOURLY_LABOR_CUTOFF = 18.0
-COGS_CUTOFF = 31.5
+DEFAULT_COGS_PERCENT = 31.5
+DEFAULT_STORE_MARGIN_PERCENT = 10.0
+
+# Chart series. Net sales is drawn first.
+BASIS_ORDER = ["Net sales", "Gross sales"]
 
 # Roles paid from the salary feed. Their shift rows are
 # not hourly labor. GM and DM stay out even when the
@@ -106,10 +101,15 @@ def month_periods(cogs: pd.DataFrame) -> pd.DataFrame:
 
 
 def sales_by_day(sales: pd.DataFrame) -> pd.DataFrame:
-    """Net sales for each store and business date."""
+    """Net and gross sales for each store and business date."""
 
     empty = pd.DataFrame(
-        columns=["business_date", "location_key", "net_sales"]
+        columns=[
+            "business_date",
+            "location_key",
+            "net_sales",
+            "gross_sales",
+        ]
     )
     if (
         sales is None
@@ -125,16 +125,28 @@ def sales_by_day(sales: pd.DataFrame) -> pd.DataFrame:
         working["business_date"],
         errors="coerce",
     ).dt.normalize()
+    if "gross_sales" not in working.columns:
+        working["gross_sales"] = float("nan")
+    working["gross_sales"] = pd.to_numeric(
+        working["gross_sales"],
+        errors="coerce",
+    )
     working = working.dropna(subset=["business_date", "location_key"])
     if working.empty:
         return empty
 
-    return (
+    grouped = (
         working
         .groupby(["business_date", "location_key"], as_index=False)
-        ["net_sales"]
-        .sum()
+        .agg(
+            net_sales=("net_sales", "sum"),
+            gross_sales=(
+                "gross_sales",
+                lambda values: values.sum(min_count=1),
+            ),
+        )
     )
+    return grouped
 
 
 def hourly_wages_by_day(
@@ -190,6 +202,12 @@ def hourly_wages_by_day(
     )
 
 
+def sum_present(values: pd.Series) -> float:
+    """Sum a column, and stay blank when every value is blank."""
+
+    return values.sum(min_count=1)
+
+
 def sum_in_periods(
     daily: pd.DataFrame,
     periods: pd.DataFrame,
@@ -198,7 +216,8 @@ def sum_in_periods(
     """Sum a daily measure into each store month.
 
     A business date counts when it falls on start_date,
-    on end_date, or on a day between them.
+    on end_date, or on a day between them. A month whose
+    values are all blank stays blank instead of becoming zero.
     """
 
     empty = pd.DataFrame(
@@ -229,7 +248,7 @@ def sum_in_periods(
         .groupby(PERIOD_KEYS, as_index=False)
         .agg(
             **{
-                value_column: (value_column, "sum"),
+                value_column: (value_column, sum_present),
                 "days": ("business_date", "nunique"),
             }
         )
@@ -259,24 +278,27 @@ def build_store_months(
     shifts: pd.DataFrame,
     salary: pd.DataFrame,
 ) -> pd.DataFrame:
-    """COGS %, hourly labor %, and estimated net profit by store month.
+    """COGS % and hourly labor % of net and gross sales by store month.
 
-    Actual margin starts at the store margin. Each point of
-    hourly labor above 18% reduces it by a point, and each
-    point of COGS above 31.5% reduces it by a point. A month
-    under a cutoff gains those points back. Estimated net
-    profit is that month's net sales times the actual margin.
+    Margin and estimated profit are applied later from the
+    targets the user enters.
     """
 
     periods = month_periods(cogs)
     if periods.empty:
         return periods
 
+    daily_sales = sales_by_day(sales)
     sales_totals = sum_in_periods(
-        sales_by_day(sales),
+        daily_sales,
         periods,
         "net_sales",
     ).rename(columns={"days": "sales_days"})
+    gross_totals = sum_in_periods(
+        daily_sales,
+        periods,
+        "gross_sales",
+    ).drop(columns=["days"])
     wage_totals = sum_in_periods(
         hourly_wages_by_day(shifts, salaried_roles(salary)),
         periods,
@@ -284,28 +306,26 @@ def build_store_months(
     ).rename(columns={"days": "labor_days"})
 
     frame = periods.merge(sales_totals, on=PERIOD_KEYS, how="left")
+    frame = frame.merge(gross_totals, on=PERIOD_KEYS, how="left")
     frame = frame.merge(wage_totals, on=PERIOD_KEYS, how="left")
     frame["days_in_month"] = (
         (frame["end_date"] - frame["start_date"]).dt.days + 1
     ).astype(int)
-    frame["cogs_percent"] = assign_percent(
+    frame["cogs_percent_net"] = assign_percent(
         frame["cogs_amount"],
         frame["net_sales"],
     )
-    frame["hourly_percent"] = assign_percent(
+    frame["cogs_percent_gross"] = assign_percent(
+        frame["cogs_amount"],
+        frame["gross_sales"],
+    )
+    frame["hourly_percent_net"] = assign_percent(
         frame["hourly_wages"],
         frame["net_sales"],
     )
-    frame["base_margin_percent"] = frame["location_key"].map(
-        STORE_MARGIN_PERCENT
-    )
-    frame["actual_margin_percent"] = (
-        frame["base_margin_percent"]
-        + (HOURLY_LABOR_CUTOFF - frame["hourly_percent"])
-        + (COGS_CUTOFF - frame["cogs_percent"])
-    )
-    frame["estimated_net_profit"] = (
-        frame["net_sales"] * frame["actual_margin_percent"] / 100
+    frame["hourly_percent_gross"] = assign_percent(
+        frame["hourly_wages"],
+        frame["gross_sales"],
     )
     frame["sales_coverage"] = [
         "—"
@@ -320,6 +340,44 @@ def build_store_months(
         ["start_date", "location"],
         ascending=[False, True],
     ).reset_index(drop=True)
+
+
+def apply_margin_inputs(
+    frame: pd.DataFrame,
+    store_margin_percent: float,
+    cogs_net_percent: float,
+    cogs_gross_percent: float,
+) -> pd.DataFrame:
+    """Actual margin and estimated profit from the entered targets.
+
+    Actual margin starts at the store margin. Each point of
+    hourly labor above 18% reduces it by a point, and each
+    point of COGS above its target reduces it by a point.
+    A month under a target gains those points back. Net sales
+    and gross sales each use their own hourly labor %, COGS %,
+    and COGS target. Estimated profit is that basis's sales
+    times its actual margin.
+    """
+
+    scored = frame.copy()
+    scored["store_margin_percent"] = float(store_margin_percent)
+    scored["actual_margin_net"] = (
+        scored["store_margin_percent"]
+        + (HOURLY_LABOR_CUTOFF - scored["hourly_percent_net"])
+        + (float(cogs_net_percent) - scored["cogs_percent_net"])
+    )
+    scored["actual_margin_gross"] = (
+        scored["store_margin_percent"]
+        + (HOURLY_LABOR_CUTOFF - scored["hourly_percent_gross"])
+        + (float(cogs_gross_percent) - scored["cogs_percent_gross"])
+    )
+    scored["estimated_profit_net"] = (
+        scored["net_sales"] * scored["actual_margin_net"] / 100
+    )
+    scored["estimated_profit_gross"] = (
+        scored["gross_sales"] * scored["actual_margin_gross"] / 100
+    )
+    return scored
 
 
 def format_whole_dollars(value) -> str:
@@ -343,21 +401,32 @@ def percent_cell_style(cutoff: float):
     return style_cell
 
 
-def style_table(frame: pd.DataFrame):
-    """Color COGS % and hourly labor % against their cutoffs."""
+def style_table(
+    frame: pd.DataFrame,
+    cogs_net_percent: float,
+    cogs_gross_percent: float,
+):
+    """Color COGS % and hourly labor % against their targets."""
 
     styler = frame.style
     styler = styler.map(
-        percent_cell_style(COGS_CUTOFF),
-        subset=["cogs_percent"],
+        percent_cell_style(cogs_net_percent),
+        subset=["cogs_percent_net"],
+    )
+    styler = styler.map(
+        percent_cell_style(cogs_gross_percent),
+        subset=["cogs_percent_gross"],
     )
     return styler.map(
         percent_cell_style(HOURLY_LABOR_CUTOFF),
-        subset=["hourly_percent"],
+        subset=["hourly_percent_net", "hourly_percent_gross"],
     )
 
 
-def table_column_config() -> dict:
+def table_column_config(
+    cogs_net_percent: float,
+    cogs_gross_percent: float,
+) -> dict:
     """Readable headers for the store-month table."""
 
     return {
@@ -375,21 +444,37 @@ def table_column_config() -> dict:
                 "this month."
             ),
         ),
+        "gross_sales": st.column_config.NumberColumn(
+            "Gross sales",
+            format="$%,.0f",
+            help=(
+                "Gross sales whose business date falls in "
+                "this month."
+            ),
+        ),
         "cogs_amount": st.column_config.NumberColumn(
             "COGS $",
             format="$%,.0f",
             help="Sum of cogs_summary amount for this store and month.",
         ),
-        "cogs_percent": st.column_config.NumberColumn(
-            "COGS %",
+        "cogs_percent_net": st.column_config.NumberColumn(
+            "COGS % of net",
             format="%.2f%%",
             help=(
                 "COGS dollars divided by net sales. "
-                f"The cutoff is {COGS_CUTOFF:.1f}%."
+                f"The target is {cogs_net_percent:.1f}%."
             ),
         ),
-        "hourly_percent": st.column_config.NumberColumn(
-            "Hourly labor %",
+        "cogs_percent_gross": st.column_config.NumberColumn(
+            "COGS % of gross",
+            format="%.2f%%",
+            help=(
+                "COGS dollars divided by gross sales. "
+                f"The target is {cogs_gross_percent:.1f}%."
+            ),
+        ),
+        "hourly_percent_net": st.column_config.NumberColumn(
+            "Hourly labor % of net",
             format="%.2f%%",
             help=(
                 "Hourly shift wages divided by net sales. "
@@ -397,27 +482,50 @@ def table_column_config() -> dict:
                 f"The cutoff is {HOURLY_LABOR_CUTOFF:.1f}%."
             ),
         ),
-        "base_margin_percent": st.column_config.NumberColumn(
-            "Store margin",
-            format="%.1f%%",
-        ),
-        "actual_margin_percent": st.column_config.NumberColumn(
-            "Actual margin",
+        "hourly_percent_gross": st.column_config.NumberColumn(
+            "Hourly labor % of gross",
             format="%.2f%%",
             help=(
-                "Store margin + (hourly cutoff − hourly labor %) "
-                "+ (COGS cutoff − COGS %)."
+                "Hourly shift wages divided by gross sales. "
+                "Salaried roles are left out. "
+                f"The cutoff is {HOURLY_LABOR_CUTOFF:.1f}%."
             ),
         ),
-        "estimated_net_profit": st.column_config.NumberColumn(
-            "Estimated net profit",
+        "store_margin_percent": st.column_config.NumberColumn(
+            "Store margin",
+            format="%.1f%%",
+            help="Store margin entered for this view.",
+        ),
+        "actual_margin_net": st.column_config.NumberColumn(
+            "Actual margin, net",
+            format="%.2f%%",
+            help=(
+                "Store margin + (hourly cutoff − hourly labor % of net) "
+                "+ (COGS % of net sales − COGS % of net)."
+            ),
+        ),
+        "actual_margin_gross": st.column_config.NumberColumn(
+            "Actual margin, gross",
+            format="%.2f%%",
+            help=(
+                "Store margin + (hourly cutoff − hourly labor % of gross) "
+                "+ (COGS % of gross sales − COGS % of gross)."
+            ),
+        ),
+        "estimated_profit_net": st.column_config.NumberColumn(
+            "Profit on net",
             format="$%,.0f",
-            help="Net sales times the actual margin.",
+            help="Net sales times the actual margin for net sales.",
+        ),
+        "estimated_profit_gross": st.column_config.NumberColumn(
+            "Profit on gross",
+            format="$%,.0f",
+            help="Gross sales times the actual margin for gross sales.",
         ),
         "sales_coverage": st.column_config.TextColumn(
             "Sales days",
             help=(
-                "Business dates with net sales, out of the "
+                "Business dates with sales, out of the "
                 "days in the month. COGS is the full month, "
                 "so a short sales feed makes COGS % high."
             ),
@@ -425,13 +533,69 @@ def table_column_config() -> dict:
     }
 
 
-def store_color_scale(locations: list[str]) -> alt.Scale:
-    """One color per store, stable across both charts."""
+def basis_color(show_legend: bool = True) -> alt.Color:
+    """Net sales in blue, gross sales in orange."""
 
-    return alt.Scale(
-        domain=locations,
-        range=STORE_COLORS[: len(locations)],
+    return alt.Color(
+        "basis:N",
+        title=None,
+        sort=BASIS_ORDER,
+        scale=alt.Scale(
+            domain=BASIS_ORDER,
+            range=STORE_COLORS[: len(BASIS_ORDER)],
+        ),
+        legend=alt.Legend() if show_legend else None,
     )
+
+
+def to_basis_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    """One row per month for net sales, and one for gross sales."""
+
+    specs = (
+        (
+            "Net sales",
+            "cogs_percent_net",
+            "hourly_percent_net",
+            "actual_margin_net",
+            "estimated_profit_net",
+            "net_sales",
+        ),
+        (
+            "Gross sales",
+            "cogs_percent_gross",
+            "hourly_percent_gross",
+            "actual_margin_gross",
+            "estimated_profit_gross",
+            "gross_sales",
+        ),
+    )
+    pieces = []
+    for (
+        basis,
+        cogs_column,
+        hourly_column,
+        margin_column,
+        profit_column,
+        sales_column,
+    ) in specs:
+        piece = pd.DataFrame(
+            {
+                "start_date": frame["start_date"].to_numpy(),
+                "location": frame["location"].to_numpy(),
+                "cogs_amount": frame["cogs_amount"].to_numpy(),
+                "sales_coverage": frame["sales_coverage"].to_numpy(),
+                "basis": basis,
+                "sales": frame[sales_column].to_numpy(),
+                "cogs_percent": frame[cogs_column].to_numpy(),
+                "hourly_percent": frame[hourly_column].to_numpy(),
+                "actual_margin_percent": frame[margin_column].to_numpy(),
+                "estimated_profit": frame[profit_column].to_numpy(),
+            }
+        )
+        pieces.append(piece)
+    if not pieces:
+        return pd.DataFrame()
+    return pd.concat(pieces, ignore_index=True)
 
 
 def with_month_label(frame: pd.DataFrame) -> pd.DataFrame:
@@ -467,19 +631,51 @@ def month_axis(frame: pd.DataFrame) -> alt.X:
     )
 
 
-def cogs_chart(frame: pd.DataFrame, locations: list[str]) -> alt.Chart:
-    """COGS % by month, with a line at the cutoff."""
+def cutoff_rules(
+    cogs_net_percent: float,
+    cogs_gross_percent: float,
+) -> alt.Chart:
+    """Dashed target for each sales basis.
 
-    scored = with_month_label(frame[frame["cogs_percent"].notna()])
-    color = alt.Color(
-        "location:N",
-        title="Store",
-        sort=locations,
-        scale=store_color_scale(locations),
+    One shared target is a single red line. Two different
+    targets use the same colors as the COGS lines.
+    """
+
+    if cogs_net_percent == cogs_gross_percent:
+        return (
+            alt.Chart(pd.DataFrame({"cutoff": [cogs_net_percent]}))
+            .mark_rule(strokeDash=[6, 4], color="#b42318")
+            .encode(y="cutoff:Q")
+        )
+
+    targets = pd.DataFrame(
+        {
+            "basis": BASIS_ORDER,
+            "cutoff": [cogs_net_percent, cogs_gross_percent],
+        }
     )
+    return (
+        alt.Chart(targets)
+        .mark_rule(strokeDash=[6, 4])
+        .encode(y="cutoff:Q", color=basis_color(show_legend=False))
+    )
+
+
+def cogs_chart(
+    frame: pd.DataFrame,
+    cogs_net_percent: float,
+    cogs_gross_percent: float,
+) -> alt.Chart:
+    """COGS % of net sales and of gross sales, with target lines."""
+
+    scored = with_month_label(
+        to_basis_rows(frame)
+    )
+    scored = scored[scored["cogs_percent"].notna()]
     y_max = max(
         float(scored["cogs_percent"].max()),
-        COGS_CUTOFF,
+        float(cogs_net_percent),
+        float(cogs_gross_percent),
         1.0,
     ) * 1.15
     lines = (
@@ -489,13 +685,13 @@ def cogs_chart(frame: pd.DataFrame, locations: list[str]) -> alt.Chart:
             x=month_axis(scored),
             y=alt.Y(
                 "cogs_percent:Q",
-                title="COGS % of net sales",
+                title="COGS %",
                 scale=alt.Scale(domain=[0, y_max]),
                 axis=alt.Axis(format=".1f"),
             ),
-            color=color,
+            color=basis_color(),
             tooltip=[
-                alt.Tooltip("location:N", title="Store"),
+                alt.Tooltip("basis:N", title="Sales"),
                 alt.Tooltip("month_label:N", title="Month"),
                 alt.Tooltip(
                     "cogs_percent:Q",
@@ -508,50 +704,42 @@ def cogs_chart(frame: pd.DataFrame, locations: list[str]) -> alt.Chart:
                     format="$,.0f",
                 ),
                 alt.Tooltip(
-                    "net_sales:Q",
-                    title="Net sales",
+                    "sales:Q",
+                    title="Sales",
                     format="$,.0f",
                 ),
             ],
         )
     )
-    cutoff = (
-        alt.Chart(pd.DataFrame({"cutoff": [COGS_CUTOFF]}))
-        .mark_rule(strokeDash=[6, 4], color="#b42318")
-        .encode(y="cutoff:Q")
-    )
-    return (lines + cutoff).properties(height=340)
+    return (lines + cutoff_rules(
+        cogs_net_percent,
+        cogs_gross_percent,
+    )).properties(height=340)
 
 
-def profit_chart(frame: pd.DataFrame, locations: list[str]) -> alt.Chart:
-    """Estimated net profit by store and month."""
+def profit_chart(frame: pd.DataFrame) -> alt.Chart:
+    """Estimated profit on net sales and on gross sales."""
 
-    scored = with_month_label(
-        frame[frame["estimated_net_profit"].notna()]
-    )
+    scored = with_month_label(to_basis_rows(frame))
+    scored = scored[scored["estimated_profit"].notna()]
     return (
         alt.Chart(scored)
         .mark_bar()
         .encode(
             x=month_axis(scored),
-            xOffset=alt.XOffset("location:N", sort=locations),
+            xOffset=alt.XOffset("basis:N", sort=BASIS_ORDER),
             y=alt.Y(
-                "estimated_net_profit:Q",
-                title="Estimated net profit",
+                "estimated_profit:Q",
+                title="Estimated profit",
                 axis=alt.Axis(format="$,.0f"),
             ),
-            color=alt.Color(
-                "location:N",
-                title="Store",
-                sort=locations,
-                scale=store_color_scale(locations),
-            ),
+            color=basis_color(),
             tooltip=[
-                alt.Tooltip("location:N", title="Store"),
+                alt.Tooltip("basis:N", title="Sales"),
                 alt.Tooltip("month_label:N", title="Month"),
                 alt.Tooltip(
-                    "estimated_net_profit:Q",
-                    title="Estimated net profit",
+                    "estimated_profit:Q",
+                    title="Estimated profit",
                     format="$,.0f",
                 ),
                 alt.Tooltip(
@@ -560,14 +748,106 @@ def profit_chart(frame: pd.DataFrame, locations: list[str]) -> alt.Chart:
                     format=".2f",
                 ),
                 alt.Tooltip(
-                    "net_sales:Q",
-                    title="Net sales",
+                    "sales:Q",
+                    title="Sales",
                     format="$,.0f",
                 ),
             ],
         )
         .properties(height=340)
     )
+
+
+def render_latest_metrics(
+    row: pd.Series,
+    cogs_net_percent: float,
+    cogs_gross_percent: float,
+) -> None:
+    """Latest month: COGS % and estimated profit for both bases."""
+
+    columns = st.columns(4)
+    cogs_specs = (
+        (
+            "COGS % of net sales",
+            "cogs_percent_net",
+            cogs_net_percent,
+            "net_sales",
+            "net sales",
+        ),
+        (
+            "COGS % of gross sales",
+            "cogs_percent_gross",
+            cogs_gross_percent,
+            "gross_sales",
+            "gross sales",
+        ),
+    )
+    for index, (
+        label,
+        percent_column,
+        target,
+        sales_column,
+        sales_name,
+    ) in enumerate(cogs_specs):
+        percent = row[percent_column]
+        sales = row[sales_column]
+        if pd.isna(percent):
+            delta = None
+            help_text = (
+                f"{row['location']} has COGS for this month, and "
+                f"the sales table has no {sales_name} in the "
+                "same dates."
+            )
+        else:
+            delta = f"{percent - target:+.2f} pts"
+            help_text = escape_dollar_signs(
+                f"{format_whole_dollars(row['cogs_amount'])} COGS of "
+                f"{format_whole_dollars(sales)} {sales_name}. "
+                f"Target {target:.1f}%. "
+                f"Sales days: {row['sales_coverage']}."
+            )
+        columns[index].metric(
+            label,
+            format_metric_value(percent, "percent"),
+            delta=delta,
+            delta_color="inverse",
+            help=help_text,
+        )
+
+    profit_specs = (
+        (
+            "Profit on net sales",
+            "estimated_profit_net",
+            "actual_margin_net",
+            "hourly_percent_net",
+            "net sales",
+        ),
+        (
+            "Profit on gross sales",
+            "estimated_profit_gross",
+            "actual_margin_gross",
+            "hourly_percent_gross",
+            "gross sales",
+        ),
+    )
+    for index, (
+        label,
+        profit_column,
+        margin_column,
+        hourly_column,
+        sales_name,
+    ) in enumerate(profit_specs):
+        columns[index + 2].metric(
+            label,
+            format_whole_dollars(row[profit_column]),
+            help=escape_dollar_signs(
+                f"Actual margin on {sales_name} "
+                f"{format_metric_value(row[margin_column], 'percent')}. "
+                "Hourly labor "
+                f"{format_metric_value(row[hourly_column], 'percent')} "
+                f"against a {HOURLY_LABOR_CUTOFF:.1f}% cutoff."
+            ),
+        )
 
 
 def month_choices(frame: pd.DataFrame) -> list[pd.Timestamp]:
@@ -591,11 +871,12 @@ def month_label(month) -> str:
 
 st.title("COGS")
 st.caption(
-    "COGS % is the month's cost of goods divided by net sales. "
-    "Net sales are the daily sales whose business date falls "
-    "in that month. Estimated net profit starts from each "
-    "store's margin, then moves by the same number of points "
-    "that hourly labor and COGS miss their cutoffs."
+    "Pick one store, then set the store margin and the COGS "
+    "targets for net sales and gross sales. COGS % is that "
+    "month's cost of goods divided by sales whose business "
+    "date falls in the month. Estimated profit starts from "
+    "the store margin, then moves by the same number of points "
+    "that hourly labor and COGS miss their targets."
 )
 
 try:
@@ -651,149 +932,193 @@ months = build_store_months(cogs_df, sales_df, shift_df, salary_df)
 st.sidebar.header("Filters")
 
 location_names = ordered_locations(months["location"])
-selected_locations = st.sidebar.multiselect(
+if not location_names:
+    st.info("No stores were returned with COGS.")
+    st.stop()
+
+default_store_index = 0
+for index, name in enumerate(location_names):
+    if str(name).casefold() == "leander":
+        default_store_index = index
+        break
+
+selected_location = st.sidebar.selectbox(
     "Store",
     options=location_names,
-    default=location_names,
-)
-month_starts = month_choices(months)
-selected_month_labels = st.sidebar.multiselect(
-    "Month",
-    options=[month_label(month) for month in month_starts],
-    default=[month_label(month) for month in month_starts],
+    index=default_store_index,
 )
 
+store_months = months.loc[
+    months["location"] == selected_location
+].copy()
+month_starts = month_choices(store_months)
+month_options = [month_label(month) for month in month_starts]
+if month_options:
+    selected_month_labels = st.sidebar.multiselect(
+        "Month",
+        options=month_options,
+        default=month_options,
+        key=f"cogs_months_{selected_location}",
+    )
+else:
+    selected_month_labels = []
+
 st.sidebar.header("Margins")
-st.sidebar.caption(
-    "Leander 17%. Marble Falls 7%. Lampasas 7%. Temple 22%."
+cogs_net_percent = st.sidebar.number_input(
+    "COGS % of net sales",
+    min_value=0.0,
+    max_value=100.0,
+    value=DEFAULT_COGS_PERCENT,
+    step=0.1,
+    format="%.1f",
+    help=(
+        "Target COGS as a percent of net sales. Each point "
+        "above this lowers the actual margin on net sales "
+        "by a point."
+    ),
+)
+cogs_gross_percent = st.sidebar.number_input(
+    "COGS % of gross sales",
+    min_value=0.0,
+    max_value=100.0,
+    value=DEFAULT_COGS_PERCENT,
+    step=0.1,
+    format="%.1f",
+    help=(
+        "Target COGS as a percent of gross sales. Each point "
+        "above this lowers the actual margin on gross sales "
+        "by a point."
+    ),
+)
+store_margin_percent = st.sidebar.number_input(
+    "Store margin",
+    min_value=0.0,
+    max_value=100.0,
+    value=DEFAULT_STORE_MARGIN_PERCENT,
+    step=0.1,
+    format="%.1f",
+    help=(
+        "Starting margin, in percent. Hourly labor and COGS "
+        "move the actual margin from here."
+    ),
 )
 st.sidebar.caption(
-    f"Hourly labor cutoff {HOURLY_LABOR_CUTOFF:.1f}%. "
-    f"COGS cutoff {COGS_CUTOFF:.1f}%."
+    f"Hourly labor cutoff {HOURLY_LABOR_CUTOFF:.1f}%."
 )
 st.sidebar.caption(
     "Actual margin = store margin "
     "+ (hourly cutoff − hourly labor %) "
-    "+ (COGS cutoff − COGS %). "
-    "Estimated net profit = net sales × actual margin."
+    "+ (COGS target − COGS %). "
+    "Estimated profit = sales × actual margin. "
+    "Net sales and gross sales are calculated separately."
 )
 
-if not selected_locations or not selected_month_labels:
-    st.info("Select at least one store and one month.")
+if not month_options:
+    st.info(f"No COGS months for {selected_location}.")
     st.stop()
 
-selected_months = {
-    month_label(month)
-    for month in month_starts
-    if month_label(month) in selected_month_labels
-}
-view = months[
-    months["location"].isin(selected_locations)
-    & months["start_date"].map(month_label).isin(selected_months)
+if not selected_month_labels:
+    st.info("Select at least one month.")
+    st.stop()
+
+selected_months = set(selected_month_labels)
+view = store_months.loc[
+    store_months["start_date"].map(month_label).isin(selected_months)
 ].copy()
 
 if view.empty:
-    st.info("No COGS rows match the selected stores and months.")
+    st.info("No COGS rows match the selected store and months.")
     st.stop()
 
-latest_month = view["start_date"].max()
-latest = view.loc[view["start_date"].eq(latest_month)].copy()
-latest["location"] = pd.Categorical(
-    latest["location"],
-    categories=ordered_locations(latest["location"]),
-    ordered=True,
+view = apply_margin_inputs(
+    view,
+    store_margin_percent,
+    cogs_net_percent,
+    cogs_gross_percent,
 )
-latest = latest.sort_values("location")
 
-st.subheader(month_label(latest_month))
-store_count = len(latest)
-metric_columns = st.columns(store_count)
-profit_columns = st.columns(store_count)
+latest_month = view["start_date"].max()
+latest = view.loc[view["start_date"].eq(latest_month)].iloc[0]
 
-for index, row in enumerate(latest.itertuples(index=False)):
-    cogs_percent = row.cogs_percent
-    if pd.isna(cogs_percent):
-        delta = None
-        help_text = (
-            f"{row.location} has COGS for this month, and the "
-            "sales table has no net sales in the same dates."
+st.subheader(f"{latest['location']} · {month_label(latest_month)}")
+render_latest_metrics(
+    latest,
+    cogs_net_percent,
+    cogs_gross_percent,
+)
+
+has_cogs_percent = (
+    view["cogs_percent_net"].notna()
+    | view["cogs_percent_gross"].notna()
+)
+st.subheader("COGS % by month")
+if not bool(has_cogs_percent.any()):
+    st.info(
+        "COGS % needs net sales or gross sales in the same "
+        "month. The sales table has no business dates inside "
+        "the selected months for this store."
+    )
+else:
+    st.altair_chart(
+        cogs_chart(view, cogs_net_percent, cogs_gross_percent),
+        use_container_width=True,
+    )
+    if cogs_net_percent == cogs_gross_percent:
+        target_text = (
+            f"The dashed line is the {cogs_net_percent:.1f}% "
+            "COGS target for both net sales and gross sales."
         )
     else:
-        delta = f"{cogs_percent - COGS_CUTOFF:+.2f} pts"
-        help_text = escape_dollar_signs(
-            f"{format_whole_dollars(row.cogs_amount)} COGS of "
-            f"{format_whole_dollars(row.net_sales)} net sales. "
-            f"Sales days: {row.sales_coverage}."
+        target_text = (
+            "Dashed lines mark the targets: "
+            f"{cogs_net_percent:.1f}% of net sales and "
+            f"{cogs_gross_percent:.1f}% of gross sales."
         )
-    metric_columns[index].metric(
-        f"{row.location} COGS %",
-        format_metric_value(cogs_percent, "percent"),
-        delta=delta,
-        delta_color="inverse",
-        help=help_text,
-    )
-    profit_columns[index].metric(
-        f"{row.location} profit",
-        format_whole_dollars(row.estimated_net_profit),
-        help=escape_dollar_signs(
-            "Actual margin "
-            f"{format_metric_value(row.actual_margin_percent, 'percent')}. "
-            "Hourly labor "
-            f"{format_metric_value(row.hourly_percent, 'percent')} "
-            f"against a {HOURLY_LABOR_CUTOFF:.1f}% cutoff."
-        ),
+    st.caption(
+        target_text
+        + " Each point is that month's COGS dollars divided "
+        "by sales."
     )
 
-chart_locations = ordered_locations(view["location"])
-scored = view[view["cogs_percent"].notna()]
-
-st.subheader("COGS % by month")
-if scored.empty:
+has_profit = (
+    view["estimated_profit_net"].notna()
+    | view["estimated_profit_gross"].notna()
+)
+st.subheader("Estimated profit")
+if not bool(has_profit.any()):
     st.info(
-        "COGS % needs net sales in the same month. The sales "
-        "table has no business dates inside the selected months "
-        "for these stores."
+        "Estimated profit needs sales and hourly labor for "
+        "the same month."
     )
 else:
     st.altair_chart(
-        cogs_chart(view, chart_locations),
+        profit_chart(view),
         use_container_width=True,
     )
     st.caption(
-        f"The dashed line is the {COGS_CUTOFF:.1f}% COGS cutoff. "
-        "Each point is that store's COGS dollars divided by net "
-        "sales for the month."
-    )
-
-profit_rows = view[view["estimated_net_profit"].notna()]
-st.subheader("Estimated net profit")
-if profit_rows.empty:
-    st.info(
-        "Estimated net profit needs net sales and hourly labor "
-        "for the same month, and a margin for the store."
-    )
-else:
-    st.altair_chart(
-        profit_chart(view, chart_locations),
-        use_container_width=True,
-    )
-    st.caption(
-        "Net sales times the actual margin. The actual margin "
-        f"is the store margin, plus {HOURLY_LABOR_CUTOFF:.1f}% "
-        "minus hourly labor %, plus "
-        f"{COGS_CUTOFF:.1f}% minus COGS %."
+        "Sales times the actual margin. The actual margin "
+        f"is the store margin of {store_margin_percent:.1f}%, "
+        f"plus {HOURLY_LABOR_CUTOFF:.1f}% minus hourly labor %, "
+        "plus the COGS target minus COGS %. Net sales and "
+        "gross sales each use their own hourly labor %, "
+        "COGS %, and COGS target."
     )
 
 display_columns = [
     "location",
     "start_date",
     "net_sales",
+    "gross_sales",
     "cogs_amount",
-    "cogs_percent",
-    "hourly_percent",
-    "base_margin_percent",
-    "actual_margin_percent",
-    "estimated_net_profit",
+    "cogs_percent_net",
+    "cogs_percent_gross",
+    "hourly_percent_net",
+    "hourly_percent_gross",
+    "store_margin_percent",
+    "actual_margin_net",
+    "actual_margin_gross",
+    "estimated_profit_net",
+    "estimated_profit_gross",
     "sales_coverage",
 ]
 table = view[display_columns].sort_values(
@@ -803,8 +1128,11 @@ table = view[display_columns].sort_values(
 
 st.subheader("Store months")
 st.dataframe(
-    style_table(table),
-    column_config=table_column_config(),
+    style_table(table, cogs_net_percent, cogs_gross_percent),
+    column_config=table_column_config(
+        cogs_net_percent,
+        cogs_gross_percent,
+    ),
     hide_index=True,
     use_container_width=True,
 )
@@ -815,27 +1143,24 @@ short_months = view[
 ]
 if not short_months.empty:
     st.caption(
-        f"{len(short_months):,} store month(s) have net sales on "
-        "fewer days than the month contains. COGS still covers "
-        "the full month, so those COGS % figures are high "
-        "relative to a complete sales feed."
+        f"{len(short_months):,} month(s) have sales on fewer "
+        "days than the month contains. COGS still covers the "
+        "full month, so those COGS % figures are high relative "
+        "to a complete sales feed."
     )
 
-missing_sales = view[view["net_sales"].isna()]
-if not missing_sales.empty:
-    missing_names = ", ".join(ordered_locations(missing_sales["location"]))
+missing_net = int(view["net_sales"].isna().sum())
+if missing_net:
     st.caption(
-        f"{missing_names} have COGS for a selected month and no "
-        "matching net sales, so COGS % and estimated net profit "
-        "are blank for those rows."
+        f"{missing_net:,} month(s) have COGS and no matching "
+        "net sales, so COGS % of net sales and profit on net "
+        "sales are blank for those rows."
     )
 
-unknown_margin = view[view["base_margin_percent"].isna()]
-if not unknown_margin.empty:
-    unknown_names = ", ".join(
-        ordered_locations(unknown_margin["location"])
-    )
+missing_gross = int(view["gross_sales"].isna().sum())
+if missing_gross:
     st.caption(
-        f"{unknown_names} have no hardcoded margin, so estimated "
-        "net profit is blank for those stores."
+        f"{missing_gross:,} month(s) have COGS and no matching "
+        "gross sales, so COGS % of gross sales and profit on "
+        "gross sales are blank for those rows."
     )

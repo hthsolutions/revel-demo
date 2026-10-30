@@ -1054,18 +1054,27 @@ else:
 if summary_current is not None:
     current_coverage = period_coverage(summary_current)
     labor_percent_change = NOT_AVAILABLE
+    hourly_percent_change = NOT_AVAILABLE
 
-    if (
-        summary_previous is not None
-        and not pd.isna(summary_current["labor_percent"])
-        and not pd.isna(summary_previous["labor_percent"])
-    ):
-        labor_percent_change = (
-            summary_current["labor_percent"]
-            - summary_previous["labor_percent"]
-        )
+    if summary_previous is not None:
+        if (
+            not pd.isna(summary_current["labor_percent"])
+            and not pd.isna(summary_previous["labor_percent"])
+        ):
+            labor_percent_change = (
+                summary_current["labor_percent"]
+                - summary_previous["labor_percent"]
+            )
+        if (
+            not pd.isna(summary_current["hourly_percent"])
+            and not pd.isna(summary_previous["hourly_percent"])
+        ):
+            hourly_percent_change = (
+                summary_current["hourly_percent"]
+                - summary_previous["hourly_percent"]
+            )
 
-    summary_columns = st.columns(4)
+    summary_columns = st.columns(5)
 
     summary_columns[0].metric(
         "Labor % of Net Sales",
@@ -1084,6 +1093,27 @@ if summary_current is not None:
     )
 
     summary_columns[1].metric(
+        "Hourly Labor % of Net Sales",
+        format_metric_value(
+            summary_current["hourly_percent"],
+            "percent",
+        ),
+        delta=(
+            f"{hourly_percent_change:+.2f} pts"
+            if not pd.isna(hourly_percent_change)
+            else None
+        ),
+        delta_color="inverse",
+        help=escape_dollar_signs(
+            f"{current_coverage}. "
+            f"{format_whole_dollars(summary_current['hourly_labor'])} "
+            "of hourly shift wages divided by net sales. "
+            "GM, DM, and other salaried roles are excluded. "
+            f"Target {hourly_target_percent:.1f}%."
+        ),
+    )
+
+    summary_columns[2].metric(
         "Total Labor",
         format_whole_dollars(summary_current["total_labor"]),
         delta=period_delta(
@@ -1095,7 +1125,7 @@ if summary_current is not None:
         help=current_coverage,
     )
 
-    summary_columns[2].metric(
+    summary_columns[3].metric(
         "Net Sales",
         format_whole_dollars(summary_current["net_sales"]),
         delta=period_delta(
@@ -1106,7 +1136,7 @@ if summary_current is not None:
         help=current_coverage,
     )
 
-    summary_columns[3].metric(
+    summary_columns[4].metric(
         "SpLH",
         format_whole_dollars(
             summary_current["sales_per_labor_hour"]

@@ -666,7 +666,11 @@ def cogs_chart(
     cogs_net_percent: float,
     cogs_gross_percent: float,
 ) -> alt.Chart:
-    """COGS % of net sales and of gross sales, with target lines."""
+    """COGS % of net sales and of gross sales for one month.
+
+    Bars stand in for a line because the page shows one month.
+    Dashed rules are the COGS targets.
+    """
 
     scored = with_month_label(
         to_basis_rows(frame)
@@ -678,11 +682,12 @@ def cogs_chart(
         float(cogs_gross_percent),
         1.0,
     ) * 1.15
-    lines = (
+    bars = (
         alt.Chart(scored)
-        .mark_line(point=alt.OverlayMarkDef(size=80))
+        .mark_bar(size=72)
         .encode(
             x=month_axis(scored),
+            xOffset=alt.XOffset("basis:N", sort=BASIS_ORDER),
             y=alt.Y(
                 "cogs_percent:Q",
                 title="COGS %",
@@ -711,7 +716,7 @@ def cogs_chart(
             ],
         )
     )
-    return (lines + cutoff_rules(
+    return (bars + cutoff_rules(
         cogs_net_percent,
         cogs_gross_percent,
     )).properties(height=340)
@@ -763,9 +768,9 @@ def render_latest_metrics(
     cogs_net_percent: float,
     cogs_gross_percent: float,
 ) -> None:
-    """Latest month: COGS % and estimated profit for both bases."""
+    """One month: COGS %, labor cutoff, actual margins, and profit."""
 
-    columns = st.columns(4)
+    cogs_columns = st.columns(3)
     cogs_specs = (
         (
             "COGS % of net sales",
@@ -806,7 +811,7 @@ def render_latest_metrics(
                 f"Target {target:.1f}%. "
                 f"Sales days: {row['sales_coverage']}."
             )
-        columns[index].metric(
+        cogs_columns[index].metric(
             label,
             format_metric_value(percent, "percent"),
             delta=delta,
@@ -814,19 +819,70 @@ def render_latest_metrics(
             help=help_text,
         )
 
+    cogs_columns[2].metric(
+        "Hourly labor cutoff",
+        format_metric_value(HOURLY_LABOR_CUTOFF, "percent"),
+        help=(
+            "Hourly labor is "
+            f"{format_metric_value(row['hourly_percent_net'], 'percent')} "
+            "of net sales and "
+            f"{format_metric_value(row['hourly_percent_gross'], 'percent')} "
+            "of gross sales. Each point above this cutoff lowers "
+            "actual margin by a point."
+        ),
+    )
+
+    result_columns = st.columns(4)
+    margin_specs = (
+        (
+            "Actual margin, net",
+            "actual_margin_net",
+            "hourly_percent_net",
+            "cogs_percent_net",
+            cogs_net_percent,
+            "net sales",
+        ),
+        (
+            "Actual margin, gross",
+            "actual_margin_gross",
+            "hourly_percent_gross",
+            "cogs_percent_gross",
+            cogs_gross_percent,
+            "gross sales",
+        ),
+    )
+    for index, (
+        label,
+        margin_column,
+        hourly_column,
+        cogs_column,
+        cogs_target,
+        sales_name,
+    ) in enumerate(margin_specs):
+        result_columns[index].metric(
+            label,
+            format_metric_value(row[margin_column], "percent"),
+            help=(
+                f"Store margin plus ({HOURLY_LABOR_CUTOFF:.1f}% − hourly "
+                f"labor % of {sales_name}) plus ({cogs_target:.1f}% − "
+                f"COGS % of {sales_name}). Hourly labor "
+                f"{format_metric_value(row[hourly_column], 'percent')}. "
+                "COGS "
+                f"{format_metric_value(row[cogs_column], 'percent')}."
+            ),
+        )
+
     profit_specs = (
         (
             "Profit on net sales",
             "estimated_profit_net",
             "actual_margin_net",
-            "hourly_percent_net",
             "net sales",
         ),
         (
             "Profit on gross sales",
             "estimated_profit_gross",
             "actual_margin_gross",
-            "hourly_percent_gross",
             "gross sales",
         ),
     )
@@ -834,18 +890,14 @@ def render_latest_metrics(
         label,
         profit_column,
         margin_column,
-        hourly_column,
         sales_name,
     ) in enumerate(profit_specs):
-        columns[index + 2].metric(
+        result_columns[index + 2].metric(
             label,
             format_whole_dollars(row[profit_column]),
             help=escape_dollar_signs(
-                f"Actual margin on {sales_name} "
-                f"{format_metric_value(row[margin_column], 'percent')}. "
-                "Hourly labor "
-                f"{format_metric_value(row[hourly_column], 'percent')} "
-                f"against a {HOURLY_LABOR_CUTOFF:.1f}% cutoff."
+                f"{sales_name.capitalize()} times the actual margin "
+                f"of {format_metric_value(row[margin_column], 'percent')}."
             ),
         )
 
@@ -954,14 +1006,14 @@ store_months = months.loc[
 month_starts = month_choices(store_months)
 month_options = [month_label(month) for month in month_starts]
 if month_options:
-    selected_month_labels = st.sidebar.multiselect(
+    selected_month_label = st.sidebar.selectbox(
         "Month",
         options=month_options,
-        default=month_options,
-        key=f"cogs_months_{selected_location}",
+        index=0,
+        key=f"cogs_month_{selected_location}",
     )
 else:
-    selected_month_labels = []
+    selected_month_label = ""
 
 st.sidebar.header("Margins")
 cogs_net_percent = st.sidebar.number_input(
@@ -1017,17 +1069,12 @@ if not month_options:
     st.info(f"No COGS months for {selected_location}.")
     st.stop()
 
-if not selected_month_labels:
-    st.info("Select at least one month.")
-    st.stop()
-
-selected_months = set(selected_month_labels)
 view = store_months.loc[
-    store_months["start_date"].map(month_label).isin(selected_months)
+    store_months["start_date"].map(month_label).eq(selected_month_label)
 ].copy()
 
 if view.empty:
-    st.info("No COGS rows match the selected store and months.")
+    st.info("No COGS rows match the selected store and month.")
     st.stop()
 
 view = apply_margin_inputs(
@@ -1056,7 +1103,7 @@ if not bool(has_cogs_percent.any()):
     st.info(
         "COGS % needs net sales or gross sales in the same "
         "month. The sales table has no business dates inside "
-        "the selected months for this store."
+        "the selected month for this store."
     )
 else:
     st.altair_chart(
@@ -1076,7 +1123,7 @@ else:
         )
     st.caption(
         target_text
-        + " Each point is that month's COGS dollars divided "
+        + " Each bar is that month's COGS dollars divided "
         "by sales."
     )
 
@@ -1143,24 +1190,21 @@ short_months = view[
 ]
 if not short_months.empty:
     st.caption(
-        f"{len(short_months):,} month(s) have sales on fewer "
-        "days than the month contains. COGS still covers the "
-        "full month, so those COGS % figures are high relative "
-        "to a complete sales feed."
+        "This month has sales on fewer days than it contains. "
+        "COGS still covers the full month, so the COGS % "
+        "figures are high relative to a complete sales feed."
     )
 
-missing_net = int(view["net_sales"].isna().sum())
-if missing_net:
+if bool(view["net_sales"].isna().any()):
     st.caption(
-        f"{missing_net:,} month(s) have COGS and no matching "
-        "net sales, so COGS % of net sales and profit on net "
-        "sales are blank for those rows."
+        "This month has COGS and no matching net sales, so "
+        "COGS % of net sales, the net actual margin, and "
+        "profit on net sales are blank."
     )
 
-missing_gross = int(view["gross_sales"].isna().sum())
-if missing_gross:
+if bool(view["gross_sales"].isna().any()):
     st.caption(
-        f"{missing_gross:,} month(s) have COGS and no matching "
-        "gross sales, so COGS % of gross sales and profit on "
-        "gross sales are blank for those rows."
+        "This month has COGS and no matching gross sales, so "
+        "COGS % of gross sales, the gross actual margin, and "
+        "profit on gross sales are blank."
     )

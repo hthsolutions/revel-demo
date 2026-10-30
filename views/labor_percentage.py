@@ -11,6 +11,7 @@ from revel_data import (
     load_sales_data,
     load_shift_data,
     percent_change,
+    role_color,
     select_single_location,
 )
 
@@ -1568,7 +1569,13 @@ else:
                     color=alt.Color(
                         "role:N",
                         title="Role",
-                        scale=alt.Scale(scheme="tableau10"),
+                        scale=alt.Scale(
+                            domain=role_order,
+                            range=[
+                                role_color(role)
+                                for role in role_order
+                            ],
+                        ),
                         sort=role_order,
                     ),
                     opacity=alt.condition(
@@ -1832,7 +1839,13 @@ else:
                 color=alt.Color(
                     "role:N",
                     title="Role",
-                    scale=alt.Scale(scheme="tableau10"),
+                    scale=alt.Scale(
+                        domain=ot_role_order,
+                        range=[
+                            role_color(role)
+                            for role in ot_role_order
+                        ],
+                    ),
                     sort=ot_role_order,
                 ),
                 opacity=alt.condition(

@@ -12,6 +12,7 @@ from revel_data import (
     get_shift_columns,
     load_shift_clocks,
     load_shift_data,
+    role_color,
     select_single_location,
 )
 
@@ -35,28 +36,6 @@ SEGMENT_COLORS = ["#2ca02c", "#d62728"]
 # a shift on the overtime chart sits on the same clock below.
 FACET_WIDTH = 128
 Y_LABEL_EXTENT = 280
-ROLE_PALETTE = [
-    "#1f77b4",
-    "#ff7f0e",
-    "#9467bd",
-    "#8c564b",
-    "#e377c2",
-    "#17becf",
-    "#bcbd22",
-    "#7f7f7f",
-    "#aec7e8",
-    "#ffbb78",
-    "#c5b0d5",
-    "#c49c94",
-    "#f7b6d2",
-    "#9edae5",
-    "#dbdb8d",
-    "#c7c7c7",
-    "#393b79",
-    "#637939",
-    "#8c6d31",
-    "#843c39",
-]
 
 
 def format_week(week_start) -> str:
@@ -642,10 +621,7 @@ employee_order = week_totals["employee_label"].tolist()
 day_label_order = days_df["day_label"].tolist()
 first_employee = week_totals["employee"].iloc[0]
 role_order = sorted(role_df["segment"].dropna().unique(), key=str.lower)
-role_colors = [
-    ROLE_PALETTE[index % len(ROLE_PALETTE)]
-    for index in range(len(role_order))
-]
+role_colors = [role_color(role) for role in role_order]
 
 pay_df = add_missing_days(
     pay_df,

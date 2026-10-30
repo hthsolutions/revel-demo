@@ -35,6 +35,7 @@ COGS_TABLE = "cogs_summary"
 
 # One row per store per day. The line detail is JSON.
 COMBO_MIX_DAILY_VIEW = "daily-combo-mix-by-store-day"
+PRODUCT_MIX_DAILY_VIEW = "daily-product-mix-by-store-day"
 SHIFT_DAILY_VIEW = "daily-shift-summary-by-store-day"
 HOURLY_SALES_DAILY_VIEW = "daily-hourly-sales-by-store-day"
 HME_DAILY_VIEW = "daily-hme-by-store-day"
@@ -1401,16 +1402,13 @@ COMBO_MIX_TEXT_COLUMNS = [
 ]
 
 
-@st.cache_data(ttl=300)
-def load_combo_mix() -> pd.DataFrame:
-    """Retrieve combo component rows from Supabase.
+def _load_mix_lines(view_name: str) -> pd.DataFrame:
+    """One product line from a store-day mix view.
 
-    Each row is one item sold inside a combo. The source
-    `total` column is combo net sales, so summing it is the
-    combo net sales for that selection.
+    Each line's `total` is that line's net sales.
     """
 
-    dataframe = expand_daily_detail(COMBO_MIX_DAILY_VIEW, "products")
+    dataframe = expand_daily_detail(view_name, "products")
 
     if dataframe.empty:
         return pd.DataFrame(
@@ -1444,7 +1442,7 @@ def load_combo_mix() -> pd.DataFrame:
     if missing:
         found = ", ".join(dataframe.columns) or "none"
         raise ValueError(
-            f"{COMBO_MIX_DAILY_VIEW} is missing "
+            f"{view_name} is missing "
             + ", ".join(missing)
             + f". Columns on the view: {found}."
         )
@@ -1507,6 +1505,29 @@ def load_combo_mix() -> pd.DataFrame:
     return dataframe[
         [column for column in kept if column in dataframe.columns]
     ]
+
+
+@st.cache_data(ttl=300)
+def load_combo_mix() -> pd.DataFrame:
+    """Retrieve combo component rows from Supabase.
+
+    Each row is one item sold inside a combo. The source
+    `total` column is combo net sales, so summing it is the
+    combo net sales for that selection.
+    """
+
+    return _load_mix_lines(COMBO_MIX_DAILY_VIEW)
+
+
+@st.cache_data(ttl=300)
+def load_product_mix() -> pd.DataFrame:
+    """Retrieve product-mix lines from Supabase.
+
+    Each row is one product sold at a store on a business
+    date. The source `total` column is that line's net sales.
+    """
+
+    return _load_mix_lines(PRODUCT_MIX_DAILY_VIEW)
 
 
 CASH_SUMMARY_NUMERIC_COLUMNS = [

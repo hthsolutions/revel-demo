@@ -7,6 +7,7 @@ from revel_data import (
     MissingSecretError,
     escape_dollar_signs,
     load_combo_mix,
+    load_product_mix,
     load_sales_data,
     location_filter_controls,
     percent_change,
@@ -252,6 +253,95 @@ def clean_product_name(name) -> str:
     return " ".join(str(name).replace("*", "").split())
 
 
+def _text(frame: pd.DataFrame, column_name: str) -> pd.Series:
+    """A text column, or blanks when the column is absent."""
+
+    if column_name not in frame.columns:
+        return pd.Series("", index=frame.index, dtype="object")
+    return frame[column_name].fillna("").astype(str)
+
+
+def cookie_sales_mask(frame: pd.DataFrame) -> pd.Series:
+    """Food cookies, plus every Chocolate Chunk Cookie."""
+
+    if frame.empty:
+        return pd.Series(dtype="bool")
+    name = _text(frame, "product_name").str.upper()
+    subcategory = _text(frame, "product_subcategory").str.upper()
+    return (
+        (
+            name.str.contains("COOKIE", regex=False)
+            & subcategory.eq("FOOD")
+        )
+        | name.str.contains("CHOCOLATE CHUNK COOKIE", regex=False)
+    )
+
+
+def shake_sales_mask(frame: pd.DataFrame) -> pd.Series:
+    """Products whose name contains shake."""
+
+    if frame.empty:
+        return pd.Series(dtype="bool")
+    name = _text(frame, "product_name").str.lower()
+    return name.str.contains("shake", regex=False)
+
+
+def large_drink_upgrade_mask(frame: pd.DataFrame) -> pd.Series:
+    """Large drinks on a combo other than the 5 Finger Meal."""
+
+    if frame.empty:
+        return pd.Series(dtype="bool")
+    name = _text(frame, "product_name").str.upper()
+    subcategory = _text(frame, "product_subcategory").str.upper()
+    combo = _text(frame, "product_class")
+    return (
+        subcategory.eq("DRINKS")
+        & combo.str.casefold().ne("5 finger meal")
+        & name.str.contains("LARGE", regex=False)
+    )
+
+
+def rows_for_period(
+    frame: pd.DataFrame,
+    location_keys,
+    period_start,
+    period_end,
+) -> pd.DataFrame:
+    """Lines for these stores between the period bounds."""
+
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=getattr(frame, "columns", []))
+    working = frame.copy()
+    working["business_date"] = pd.to_datetime(
+        working["business_date"],
+        errors="coerce",
+    ).dt.normalize()
+    return working.loc[
+        working["location_key"].isin(location_keys)
+        & working["business_date"].between(
+            pd.Timestamp(period_start),
+            pd.Timestamp(period_end),
+            inclusive="both",
+        )
+    ].copy()
+
+
+def masked_sum(frame: pd.DataFrame, mask: pd.Series, column_name: str) -> float:
+    """Sum one column on the matching rows."""
+
+    if frame.empty or mask.empty or column_name not in frame.columns:
+        return 0.0
+    return float(frame.loc[mask, column_name].sum())
+
+
+def format_count(value) -> str:
+    """Whole number with a thousands separator."""
+
+    if value is None or pd.isna(value):
+        return "—"
+    return f"{int(round(float(value))):,}"
+
+
 def summarize_combos(frame: pd.DataFrame) -> pd.DataFrame:
     """Net sales, items, and mix for each combo."""
 
@@ -315,6 +405,13 @@ try:
     sales_df = load_sales_data()
 except Exception:
     sales_df = pd.DataFrame()
+
+try:
+    product_df = load_product_mix()
+    product_error = None
+except Exception as error:
+    product_df = pd.DataFrame()
+    product_error = str(error)
 
 
 # ---------------------------------------------------------
@@ -559,6 +656,113 @@ else:
         f"Highest selling {top_combo_name} type",
         top_build_name,
     )
+
+    location_keys = location_df["location_key"].unique()
+    current_products = rows_for_period(
+        product_df,
+        location_keys,
+        selected_period["period_start"],
+        selected_period["period_end"],
+    )
+    previous_period = calendar.loc[calendar["period_index"].eq(1)]
+    if previous_period.empty:
+        previous_products = product_df.iloc[0:0].copy()
+    else:
+        previous_products = rows_for_period(
+            product_df,
+            location_keys,
+            previous_period.iloc[0]["period_start"],
+            previous_period.iloc[0]["period_end"],
+        )
+
+    if product_error is None:
+        cookie_sales = masked_sum(
+            current_products,
+            cookie_sales_mask(current_products),
+            "net_sales",
+        )
+        previous_cookie_sales = masked_sum(
+            previous_products,
+            cookie_sales_mask(previous_products),
+            "net_sales",
+        )
+        shake_sales = masked_sum(
+            current_products,
+            shake_sales_mask(current_products),
+            "net_sales",
+        )
+        previous_shake_sales = masked_sum(
+            previous_products,
+            shake_sales_mask(previous_products),
+            "net_sales",
+        )
+    else:
+        cookie_sales = None
+        previous_cookie_sales = None
+        shake_sales = None
+        previous_shake_sales = None
+
+    large_drinks = masked_sum(
+        detail_df,
+        large_drink_upgrade_mask(detail_df),
+        "n_items",
+    )
+    previous_large_drinks = masked_sum(
+        previous_detail,
+        large_drink_upgrade_mask(previous_detail),
+        "n_items",
+    )
+    cookie_growth = percent_change(cookie_sales, previous_cookie_sales)
+    shake_growth = percent_change(shake_sales, previous_shake_sales)
+    large_drink_growth = percent_change(
+        large_drinks,
+        previous_large_drinks,
+    )
+
+    def growth_delta(change) -> str | None:
+        if pd.isna(change):
+            return None
+        return f"{change:+.1f}%"
+
+    extra_columns = st.columns(3)
+    extra_columns[0].metric(
+        "Cookie sales",
+        format_dollars(cookie_sales),
+        delta=growth_delta(cookie_growth),
+        help=escape_dollar_signs(
+            "Food items whose name contains Cookie, plus "
+            "Chocolate Chunk Cookie. This is store sales for "
+            f"the period, compared with {comparison_label}: "
+            f"{format_dollars(previous_cookie_sales)}."
+        ),
+    )
+    extra_columns[1].metric(
+        "Shake sales",
+        format_dollars(shake_sales),
+        delta=growth_delta(shake_growth),
+        help=escape_dollar_signs(
+            "Items whose name contains shake. This is store "
+            f"sales for the period, compared with {comparison_label}: "
+            f"{format_dollars(previous_shake_sales)}."
+        ),
+    )
+    extra_columns[2].metric(
+        "Large drink upgrades",
+        format_count(large_drinks),
+        delta=growth_delta(large_drink_growth),
+        help=(
+            "Large drinks sold with a combo, excluding the "
+            "5 Finger Meal. The count is the number of items. "
+            f"Compared with {comparison_label}: "
+            f"{format_count(previous_large_drinks)}."
+        ),
+    )
+    if product_error:
+        st.caption(
+            "Cookie and shake sales are unavailable: "
+            f"{product_error}"
+        )
+
     st.caption(
         f"The change on combo net sales is versus {comparison_label}."
     )

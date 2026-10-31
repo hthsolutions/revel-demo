@@ -6,6 +6,7 @@ from revel_data import (
     MissingSecretError,
     escape_dollar_signs,
     format_metric_value,
+    load_cash_variance,
     load_cogs_summary,
     load_salary_data,
     load_sales_data,
@@ -399,6 +400,79 @@ def percent_cell_style(cutoff: float):
         return WITHIN_STYLE
 
     return style_cell
+
+
+def cash_amount_style(value) -> str:
+    """Green for an overage, red for a shortage."""
+
+    if pd.isna(value) or value == 0:
+        return ""
+    if value < 0:
+        return WITHIN_STYLE
+    return OVER_STYLE
+
+
+def style_cash_table(frame: pd.DataFrame):
+    """Color the cash amount by sign."""
+
+    if frame.empty or "amount" not in frame.columns:
+        return frame
+    return frame.style.map(cash_amount_style, subset=["amount"])
+
+
+def cash_column_config() -> dict:
+    """Readable headers for the cash over/short table."""
+
+    return {
+        "location": "Store",
+        "start_date": st.column_config.DateColumn(
+            "Start",
+            format="MMM D, YYYY",
+        ),
+        "end_date": st.column_config.DateColumn(
+            "End",
+            format="MMM D, YYYY",
+        ),
+        "amount": st.column_config.NumberColumn(
+            "Amount",
+            format="$%,.2f",
+            help=(
+                "Cash over or short for this store and month. "
+                "A shortage is positive. An overage is negative."
+            ),
+        ),
+        "label": "Result",
+    }
+
+
+def cash_for_period(
+    cash: pd.DataFrame,
+    location_key: str,
+    start_date,
+    end_date,
+) -> pd.DataFrame:
+    """Cash rows for one store whose dates overlap the month."""
+
+    columns = [
+        "location",
+        "start_date",
+        "end_date",
+        "amount",
+        "label",
+    ]
+    if cash is None or cash.empty:
+        return pd.DataFrame(columns=columns)
+
+    overlap = (
+        cash["location_key"].eq(location_key)
+        & cash["start_date"].le(end_date)
+        & cash["end_date"].ge(start_date)
+    )
+    return (
+        cash.loc[overlap, columns]
+        .sort_values(["start_date", "location"])
+        .reset_index(drop=True)
+    )
 
 
 def style_table(
@@ -969,6 +1043,13 @@ except Exception as error:
     salary_df = pd.DataFrame()
     salary_error = str(error)
 
+cash_error = None
+try:
+    cash_df = load_cash_variance()
+except Exception as error:
+    cash_df = pd.DataFrame()
+    cash_error = str(error)
+
 if sales_error:
     st.warning(f"Sales are unavailable: {sales_error}")
 if shift_error:
@@ -978,6 +1059,8 @@ if salary_error:
         "Salary roles are unavailable, so only GM and DM "
         f"are left out of hourly labor: {salary_error}"
     )
+if cash_error:
+    st.warning(f"Cash over/short is unavailable: {cash_error}")
 
 months = build_store_months(cogs_df, sales_df, shift_df, salary_df)
 
@@ -1172,6 +1255,30 @@ table = view[display_columns].sort_values(
     ["start_date", "location"],
     ascending=[False, True],
 )
+
+cash_rows = cash_for_period(
+    cash_df,
+    latest["location_key"],
+    latest["start_date"],
+    latest["end_date"],
+)
+cash_rows = cash_rows.copy()
+cash_rows["label"] = cash_rows["label"].str.capitalize()
+
+st.subheader("Cash Over/Short")
+if cash_error:
+    st.info("Cash over/short could not be loaded.")
+elif cash_rows.empty:
+    st.info(
+        "No cash over/short row for this store and month."
+    )
+else:
+    st.dataframe(
+        style_cash_table(cash_rows),
+        column_config=cash_column_config(),
+        hide_index=True,
+        use_container_width=True,
+    )
 
 st.subheader("Store months")
 st.dataframe(

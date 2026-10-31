@@ -32,6 +32,7 @@ DISCOUNT_REASON_TABLE = "daily-revel-discount-reason"
 WASTE_LOG_TABLE = "waste_log_history"
 GOOGLE_REVIEWS_TABLE = "google_reviews"
 COGS_TABLE = "cogs_summary"
+CASH_VARIANCE_TABLE = "cash-variance"
 
 # One row per store per day. The line detail is JSON.
 COMBO_MIX_DAILY_VIEW = "daily-combo-mix-by-store-day"
@@ -411,6 +412,57 @@ def load_cogs_summary() -> pd.DataFrame:
         ).dt.normalize()
 
     dataframe = _coerce_numeric(dataframe, ["amount"])
+    dataframe = _add_location_key(dataframe)
+    dataframe = dataframe.dropna(subset=["start_date", "end_date"])
+    dataframe = dataframe.loc[
+        dataframe["location_key"] != "UNKNOWN"
+    ].copy()
+
+    return dataframe.sort_values(
+        ["start_date", "location"]
+    ).reset_index(drop=True)
+
+
+@st.cache_data(ttl=300)
+def load_cash_variance() -> pd.DataFrame:
+    """Cash over or short for each store and month.
+
+    amount is signed: a shortage is positive and an overage
+    is negative. label repeats that result in words.
+    start_date and end_date are the first and last day of
+    the month the amount belongs to.
+    """
+
+    columns = [
+        "location",
+        "amount",
+        "start_date",
+        "end_date",
+        "label",
+    ]
+    empty = pd.DataFrame(columns=[*columns, "location_key"])
+    dataframe = fetch_table(
+        CASH_VARIANCE_TABLE,
+        columns,
+        "start_date",
+    )
+
+    if dataframe.empty:
+        return empty
+
+    for column_name in ("start_date", "end_date"):
+        dataframe[column_name] = pd.to_datetime(
+            dataframe[column_name],
+            errors="coerce",
+        ).dt.normalize()
+
+    dataframe = _coerce_numeric(dataframe, ["amount"])
+    dataframe["label"] = (
+        dataframe["label"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
     dataframe = _add_location_key(dataframe)
     dataframe = dataframe.dropna(subset=["start_date", "end_date"])
     dataframe = dataframe.loc[

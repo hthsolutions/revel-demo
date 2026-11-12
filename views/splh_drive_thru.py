@@ -1195,7 +1195,7 @@ st.caption(
     "same periods. A day is one business date, a week is "
     "7 days, and a month is 30 days, counted backward from "
     "Date end. Hourly charts run from 10:00 AM through "
-    "11:00 PM. GM shifts are excluded."
+    "11:00 PM. Labor hours include hourly shifts and the GM."
 )
 
 sales_error = None
@@ -1242,7 +1242,6 @@ if not shift_df.empty:
         shift_df["employee"].fillna("Unknown").astype(str).str.strip()
     )
     shift_df.loc[shift_df["employee"] == "", "employee"] = "Unknown"
-    shift_df = shift_df[shift_df["role"].str.upper() != "GM"].copy()
 
 sales_hours, quarter_df, sales_skipped = prepare_hourly_sales(sales_df)
 labor_error = None
@@ -1585,7 +1584,7 @@ summary_columns[0].metric(
 summary_columns[1].metric(
     "Labor Hours",
     format_hours(current["labor_hours"]),
-    help=current_range + ". GM shifts are excluded.",
+    help=current_range + ". Includes hourly shifts and the GM.",
 )
 summary_columns[2].metric(
     "SpLH",
@@ -1596,7 +1595,7 @@ summary_columns[2].metric(
     ),
     help=(
         current_range
-        + ". Sales divided by hourly labor hours."
+        + ". Sales divided by hourly labor hours plus GM hours."
     ),
 )
 
@@ -1850,7 +1849,8 @@ else:
     st.altair_chart(splh_heatmap, use_container_width=False)
     splh_caption = (
         "Each cell is sales during that hour divided by labor "
-        "hours clocked during that hour. Rates under "
+        "hours clocked during that hour, including the GM. "
+        "Rates under "
         f"{splh_break_label} are red. Rates of {splh_break_label} "
         "and above are green, darker as the rate rises. "
     )
@@ -2347,6 +2347,6 @@ st.caption(
     f"Displaying {duration:,} {interval['unit']} for "
     f"{selected_location.lower()}, ending "
     f"{pd.Timestamp(date_end):%b %d, %Y}. "
-    "SpLH uses the same hourly sales and shift clocks as "
-    "SpLH per Hour. Lane time weights every car equally."
+    "SpLH uses hourly sales and shift clocks, including "
+    "the GM. Lane time weights every car equally."
 )

@@ -22,8 +22,9 @@ from revel_data import (
 # The other week columns run Monday through the business date.
 WEEKS_IN_YEAR = 52
 
-# Roles paid from the salary feed. Their hours stay out
-# of SpLH. GM overtime is also left out of OT hours.
+# Roles paid from the salary feed. DM and any other
+# salaried role stay out of SpLH. GM hours stay in.
+# GM overtime is left out of OT hours.
 SALARIED_ROLES = {"GM", "DM"}
 
 # Store rows follow opening date. A store that is not in
@@ -154,7 +155,7 @@ def role_keys(frame: pd.DataFrame) -> pd.Series:
 
 
 def salaried_role_keys(salary_frame: pd.DataFrame) -> set[str]:
-    """Role names paid as salary, so their hours stay out of SpLH."""
+    """Role names paid as salary."""
 
     keys = set(SALARIED_ROLES)
     if not salary_frame.empty and "role" in salary_frame.columns:
@@ -167,6 +168,14 @@ def salaried_role_keys(salary_frame: pd.DataFrame) -> set[str]:
         )
     keys.discard("")
     return keys
+
+
+def splh_excluded_roles(salary_frame: pd.DataFrame) -> set[str]:
+    """Salaried roles left out of SpLH. GM hours stay in."""
+
+    excluded = salaried_role_keys(salary_frame)
+    excluded.discard("GM")
+    return excluded
 
 
 def dated(frame: pd.DataFrame) -> pd.DataFrame:
@@ -314,7 +323,7 @@ def hours_by_day(
     shift_frame: pd.DataFrame,
     salaried: set[str],
 ) -> pd.DataFrame:
-    """Hourly labor hours, with salaried roles left out."""
+    """Hourly labor hours plus GM hours. Other salaried roles stay out."""
 
     shifts = dated(shift_frame)
     empty = pd.DataFrame(
@@ -1031,8 +1040,8 @@ def summary_column_config(
             format="$%,.2f",
             help=(
                 "That day's net sales divided by hourly labor "
-                "hours. Salaried roles, including GM, are left "
-                "out of the hours."
+                "hours plus GM hours. Other salaried roles are "
+                "left out."
             ),
         ),
         "week_splh": st.column_config.NumberColumn(
@@ -1040,8 +1049,8 @@ def summary_column_config(
             format="$%,.2f",
             help=(
                 "Net sales from Monday through the selected date "
-                f"({week_label}) divided by hourly labor hours. "
-                "Salaried roles, including GM, are left out of the hours."
+                f"({week_label}) divided by hourly labor hours "
+                "plus GM hours. Other salaried roles are left out."
             ),
         ),
         "day_lane": st.column_config.TextColumn(
@@ -1264,7 +1273,7 @@ except Exception as error:
 
 sales_daily = sales_by_day(sales_df)
 wage_daily = wages_by_day(shift_df)
-hours_daily = hours_by_day(shift_df, salaried_role_keys(salary_df))
+hours_daily = hours_by_day(shift_df, splh_excluded_roles(salary_df))
 ot_daily = ot_by_day(shift_df)
 stores = store_catalog(
     sales_daily,
@@ -1471,8 +1480,8 @@ st.caption(
     "Annualized net sales is the trailing 7 days, multiplied by 52. "
     "Hr labor % is hourly shift wages divided by net sales. "
     "18% or under is green, and above 18% is red. "
-    "SpLH is net sales divided by hourly labor hours, with "
-    "salaried roles such as GM left out of the hours. "
+    "SpLH is net sales divided by hourly labor hours plus "
+    "GM hours. Other salaried roles are left out. "
     "Drive-thru time is the car-weighted average lane time. "
     "4:00 or under is green, and above 4:00 is red. "
     "A blank cell stays uncolored. "

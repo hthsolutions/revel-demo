@@ -33,7 +33,7 @@ INTERVALS = {
     "Daily": {
         "days": 1,
         "max_duration": 60,
-        "default_duration": 30,
+        "default_duration": 1,
         "unit": "days",
         "x_title": "Business date",
         "duration_label": "Duration (days)",
@@ -43,7 +43,7 @@ INTERVALS = {
     "Weekly": {
         "days": 7,
         "max_duration": 52,
-        "default_duration": 8,
+        "default_duration": 1,
         "unit": "weeks",
         "x_title": "Week",
         "duration_label": "Duration (weeks)",
@@ -53,7 +53,7 @@ INTERVALS = {
     "Monthly": {
         "days": 30,
         "max_duration": 12,
-        "default_duration": 6,
+        "default_duration": 1,
         "unit": "months",
         "x_title": "30-day period",
         "duration_label": "Duration (months)",

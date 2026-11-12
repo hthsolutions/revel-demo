@@ -54,7 +54,7 @@ INTERVALS = {
     "Day over day": {
         "days": 1,
         "max_duration": 60,
-        "default_duration": 30,
+        "default_duration": 1,
         "unit": "days",
         "growth_title": "Day-over-day growth",
         "x_title": "Business date",
@@ -63,7 +63,7 @@ INTERVALS = {
     "Week over week": {
         "days": 7,
         "max_duration": 52,
-        "default_duration": 8,
+        "default_duration": 1,
         "unit": "weeks",
         "growth_title": "Week-over-week growth",
         "x_title": "Week",
@@ -72,7 +72,7 @@ INTERVALS = {
     "Month over month": {
         "days": 30,
         "max_duration": 12,
-        "default_duration": 6,
+        "default_duration": 1,
         "unit": "months",
         "growth_title": "Month-over-month growth",
         "x_title": "30-day period",

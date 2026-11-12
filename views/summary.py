@@ -18,8 +18,8 @@ from revel_data import (
 )
 
 
-# A full year of the selected week. Partial weeks are
-# still multiplied by 52, and the caption says so.
+# Annualized sales is the trailing 7 days times 52.
+# The other week columns run Monday through the business date.
 WEEKS_IN_YEAR = 52
 
 # Roles paid from the salary feed. Their hours stay out
@@ -76,13 +76,43 @@ def format_duration(seconds) -> str:
 
 
 def format_week_range(start, end) -> str:
-    """Label a week by its first and last day."""
+    """Label a window by its first and last day."""
 
     start = pd.Timestamp(start)
     end = pd.Timestamp(end)
+    if start.normalize() == end.normalize():
+        return f"{start:%b %d, %Y}"
     if start.year == end.year:
         return f"{start:%b %d} – {end:%b %d, %Y}"
     return f"{start:%b %d, %Y} – {end:%b %d, %Y}"
+
+
+def monday_through(business_date) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Monday of that week through the business date.
+
+    A Monday covers that day only. A Sunday covers the full week.
+    """
+
+    day = pd.Timestamp(business_date).normalize()
+    start = day - pd.Timedelta(days=int(day.weekday()))
+    return start, day
+
+
+def trailing_seven(business_date) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """The 7 days ending on the business date, inclusive."""
+
+    day = pd.Timestamp(business_date).normalize()
+    return day - pd.Timedelta(days=6), day
+
+
+def prior_matching_window(start, end) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """The same weekdays one week earlier."""
+
+    shift = pd.Timedelta(days=7)
+    return (
+        pd.Timestamp(start).normalize() - shift,
+        pd.Timestamp(end).normalize() - shift,
+    )
 
 
 def opening_position(name) -> int:
@@ -548,23 +578,51 @@ def combine_periods(
     )
 
 
+def annualized_sales(
+    week: pd.DataFrame,
+    sales_daily: pd.DataFrame,
+    trailing_start,
+    trailing_end,
+) -> pd.DataFrame:
+    """Trailing-7-day net sales multiplied by 52.
+
+    Week columns stay on Monday through the business date.
+    The All stores row annualizes the pooled trailing total.
+    """
+
+    sales = sum_by_store(
+        sales_daily,
+        "net_sales",
+        trailing_start,
+        trailing_end,
+    ).rename(
+        columns={
+            "location_key": "row_key",
+            "net_sales": "trailing_net_sales",
+        }
+    )
+    current = week[["row_key"]].merge(sales, on="row_key", how="left")
+    store_rows = current["row_key"].ne("ALL")
+    current.loc[~store_rows, "trailing_net_sales"] = _total(
+        current.loc[store_rows, "trailing_net_sales"]
+    )
+    current["annualized"] = current["trailing_net_sales"] * WEEKS_IN_YEAR
+    return current[["row_key", "annualized"]]
+
+
 def week_net_sales_growth(
     week: pd.DataFrame,
     sales_daily: pd.DataFrame,
     week_start,
     week_end,
 ) -> pd.DataFrame:
-    """Percent change in net sales versus the previous 7 days.
+    """Percent change versus the same weekdays one week earlier.
 
     The All stores row compares the two pooled totals.
     A store with no sales in the previous window stays blank.
     """
 
-    week_start = pd.Timestamp(week_start)
-    week_end = pd.Timestamp(week_end)
-    span_days = (week_end - week_start).days
-    prior_end = week_start - pd.Timedelta(days=1)
-    prior_start = prior_end - pd.Timedelta(days=span_days)
+    prior_start, prior_end = prior_matching_window(week_start, week_end)
     prior = sum_by_store(
         sales_daily,
         "net_sales",
@@ -742,9 +800,9 @@ def review_metrics(
 ) -> pd.DataFrame:
     """Day, week, and lifetime Google review figures for each store.
 
-    Week change is this 7-day window minus the 7 days
-    before it. The average change stays blank when either
-    window has no scored reviews.
+    Week change is Monday through the business date minus
+    the same weekdays one week earlier. The average change
+    stays blank when either window has no scored reviews.
     """
 
     result = pd.DataFrame(
@@ -770,9 +828,7 @@ def review_metrics(
 
     week_start = pd.Timestamp(week_start)
     week_end = pd.Timestamp(week_end)
-    span_days = (week_end - week_start).days
-    prior_end = week_start - pd.Timedelta(days=1)
-    prior_start = prior_end - pd.Timedelta(days=span_days)
+    prior_start, prior_end = prior_matching_window(week_start, week_end)
     day_rows = in_window(reviews, day, day)
     week_rows = in_window(reviews, week_start, week_end)
     prior_rows = in_window(reviews, prior_start, prior_end)
@@ -830,39 +886,45 @@ def review_metrics(
     )
 
 
-def leaderboard_column_config() -> dict:
+def leaderboard_column_config(week_start, week_end) -> dict:
     """Headers for the review leaderboard. Columns size to their content."""
 
+    week_label = format_week_range(week_start, week_end)
+    prior_start, prior_end = prior_matching_window(week_start, week_end)
+    prior_label = format_week_range(prior_start, prior_end)
     return {
         "location": st.column_config.TextColumn("Store"),
         "week_review_score": st.column_config.NumberColumn(
             "Week avg",
             format="%.2f",
             help=(
-                "Average star rating of the reviews "
-                "posted during those 7 days."
+                "Average star rating of the reviews posted "
+                f"from Monday through the business date ({week_label})."
             ),
         ),
         "week_review_score_change": st.column_config.NumberColumn(
             "Week avg (Change +/-)",
             format="%+.2f",
             help=(
-                "This week's average minus the average "
-                "for the previous 7 days. Blank when "
-                "either week has no scored reviews."
+                f"Average for {week_label} minus the average "
+                f"for the same weekdays one week earlier ({prior_label}). "
+                "Blank when either window has no scored reviews."
             ),
         ),
         "week_review_count": st.column_config.NumberColumn(
             "Week",
             format="%.0f",
-            help="Google reviews posted during those 7 days.",
+            help=(
+                "Google reviews posted from Monday through "
+                f"the business date ({week_label})."
+            ),
         ),
         "week_review_count_change": st.column_config.NumberColumn(
             "Week (change +/-)",
             format="%+.0f",
             help=(
-                "This week's review count minus the count "
-                "for the previous 7 days."
+                f"Review count for {week_label} minus the count "
+                f"for the same weekdays one week earlier ({prior_label})."
             ),
         ),
         "day_review_score": st.column_config.NumberColumn(
@@ -896,10 +958,20 @@ def table_height(row_count: int) -> int:
     return 48 + 36 * visible
 
 
-def summary_column_config(business_date) -> dict:
+def summary_column_config(
+    business_date,
+    week_start,
+    week_end,
+    trailing_start,
+    trailing_end,
+) -> dict:
     """Headers for the store comparison table."""
 
     day_label = pd.Timestamp(business_date).strftime("%b %d, %Y")
+    week_label = format_week_range(week_start, week_end)
+    prior_start, prior_end = prior_matching_window(week_start, week_end)
+    prior_label = format_week_range(prior_start, prior_end)
+    trailing_label = format_week_range(trailing_start, trailing_end)
     return {
         "rank": st.column_config.NumberColumn(
             "Rank",
@@ -909,30 +981,32 @@ def summary_column_config(business_date) -> dict:
         "day_net_sales": st.column_config.NumberColumn(
             f"Net sales (Day)",
             format="$%,.0f",
-            help="Net sales on the selected business date.",
+            help=f"Net sales on {day_label}.",
         ),
         "week_net_sales": st.column_config.NumberColumn(
             "Net sales (week)",
             format="$%,.0f",
             help=(
-                "Net sales for the 7 days ending on "
-                "the selected date."
+                "Net sales from Monday through the selected "
+                f"date ({week_label})."
             ),
         ),
         "week_net_sales_growth": st.column_config.NumberColumn(
             "Weekly Growth %",
             format="%.1f%%",
             help=(
-                "Percent change in net sales versus "
-                "the previous 7 days. Green when zero "
-                "or positive, red when negative."
+                f"Percent change in net sales for {week_label} "
+                "versus the same weekdays one week earlier "
+                f"({prior_label}). Green when zero or positive, "
+                "red when negative."
             ),
         ),
         "annualized": st.column_config.NumberColumn(
             "Annualized",
             format="$%,.0f",
             help=(
-                "Net sales for those 7 days, multiplied by 52."
+                "Net sales for the trailing 7 days "
+                f"({trailing_label}), multiplied by 52."
             ),
         ),
         "day_labor_percent": st.column_config.NumberColumn(
@@ -948,8 +1022,8 @@ def summary_column_config(business_date) -> dict:
             format="%.1f%%",
             help=(
                 "Hourly shift wages divided by net sales "
-                "for those 7 days. Green at 18% or under, "
-                "red above 18%."
+                f"from Monday through the selected date ({week_label}). "
+                "Green at 18% or under, red above 18%."
             ),
         ),
         "day_splh": st.column_config.NumberColumn(
@@ -965,9 +1039,9 @@ def summary_column_config(business_date) -> dict:
             "SpLH (week)",
             format="$%,.2f",
             help=(
-                "Net sales for those 7 days divided by hourly "
-                "labor hours. Salaried roles, including GM, "
-                "are left out of the hours."
+                "Net sales from Monday through the selected date "
+                f"({week_label}) divided by hourly labor hours. "
+                "Salaried roles, including GM, are left out of the hours."
             ),
         ),
         "day_lane": st.column_config.TextColumn(
@@ -980,8 +1054,9 @@ def summary_column_config(business_date) -> dict:
         "week_lane": st.column_config.TextColumn(
             "Drive-thru (week)",
             help=(
-                "Car-weighted average lane time over those "
-                "7 days. Green at 4:00 or under, red above 4:00."
+                "Car-weighted average lane time from Monday "
+                f"through the selected date ({week_label}). "
+                "Green at 4:00 or under, red above 4:00."
             ),
         ),
         "day_ot_hours": st.column_config.NumberColumn(
@@ -993,8 +1068,8 @@ def summary_column_config(business_date) -> dict:
             "OT hours (week)",
             format="%.1f",
             help=(
-                "Overtime hours over those 7 days. "
-                "The GM role is left out."
+                "Overtime hours from Monday through the selected "
+                f"date ({week_label}). The GM role is left out."
             ),
         ),
         "day_review_count": st.column_config.NumberColumn(
@@ -1013,14 +1088,17 @@ def summary_column_config(business_date) -> dict:
         "week_review_count": st.column_config.NumberColumn(
             "Reviews (week)",
             format="%.0f",
-            help="Google reviews posted during those 7 days.",
+            help=(
+                "Google reviews posted from Monday through "
+                f"the selected date ({week_label})."
+            ),
         ),
         "week_review_score": st.column_config.NumberColumn(
             "Avg score (week)",
             format="%.2f",
             help=(
-                "Average star rating of the reviews "
-                "posted during those 7 days."
+                "Average star rating of the reviews posted "
+                f"from Monday through the selected date ({week_label})."
             ),
         ),
         "current_review_score": st.column_config.NumberColumn(
@@ -1130,10 +1208,10 @@ def available_dates(*frames: pd.DataFrame) -> pd.Series:
 
 st.title("Summary (Weekly)")
 st.caption(
-    "Every store in Supabase, for the selected day and the "
-    "7 days ending on that date. A new store shows up here as "
-    "soon as it has sales, shifts, drive-thru cars, or "
-    "Google reviews."
+    "Every store in Supabase, for the selected day and from "
+    "Monday through that date. Annualized sales uses the 7 days "
+    "ending on that date. A new store shows up here as soon as "
+    "it has sales, shifts, drive-thru cars, or Google reviews."
 )
 
 sales_error = None
@@ -1247,7 +1325,8 @@ business_date = st.sidebar.date_input(
     key=date_key,
     help=(
         "Day columns use this business date. Week columns "
-        "and the pie use the 7 days ending on it."
+        "and the pie run from Monday through this date. "
+        "Annualized sales uses the 7 days ending on it."
     ),
 )
 if business_date is None:
@@ -1255,10 +1334,14 @@ if business_date is None:
     st.stop()
 
 day = pd.Timestamp(business_date).normalize()
-week_end = day
-week_start = day - pd.Timedelta(days=6)
+week_start, week_end = monday_through(day)
+trailing_start, trailing_end = trailing_seven(day)
 st.sidebar.caption(
-    f"Trailing 7 days: {format_week_range(week_start, week_end)}."
+    f"Week: {format_week_range(week_start, week_end)}."
+)
+st.sidebar.caption(
+    "Annualized sales: "
+    f"{format_week_range(trailing_start, trailing_end)}."
 )
 
 day_metrics = store_window(
@@ -1282,8 +1365,18 @@ week_metrics = store_window(
     hme_df,
     week_start,
     week_end,
-    annualize=True,
+    annualize=False,
     shifts_loaded=shift_error is None,
+)
+week_metrics = week_metrics.drop(columns=["annualized"]).merge(
+    annualized_sales(
+        week_metrics,
+        sales_daily,
+        trailing_start,
+        trailing_end,
+    ),
+    on="row_key",
+    how="left",
 )
 comparison = combine_periods(day_metrics, week_metrics)
 comparison = comparison.merge(
@@ -1311,7 +1404,7 @@ comparison = comparison.merge(
 
 st.subheader(
     f"{day:%A, %b %d, %Y}  ·  "
-    f"Trailing 7 days, {format_week_range(week_start, week_end)}"
+    f"Week to date, {format_week_range(week_start, week_end)}"
 )
 pie = sales_pie(week_metrics)
 if pie is None:
@@ -1332,9 +1425,9 @@ else:
     )
     st.altair_chart(pie, use_container_width=False)
     st.caption(
-        "Each slice is one store's net sales for these 7 days. "
-        "The percentage is drawn on the slice, and again "
-        "beside the store name. A slice under "
+        "Each slice is one store's net sales from Monday "
+        "through the business date. The percentage is drawn "
+        "on the slice, and again beside the store name. A slice under "
         f"{SLICE_LABEL_MIN_SHARE * 100:.1f}% keeps the "
         "percentage in the legend so the labels stay apart."
     )
@@ -1342,31 +1435,40 @@ else:
 st.subheader("Sales and Labor Performance")
 st.dataframe(
     style_performance(comparison),
-    column_config=summary_column_config(day),
+    column_config=summary_column_config(
+        day,
+        week_start,
+        week_end,
+        trailing_start,
+        trailing_end,
+    ),
     hide_index=True,
     width="content",
     height=table_height(len(comparison)),
 )
 
-week_sales = in_window(sales_daily, week_start, week_end)
+trailing_sales = in_window(sales_daily, trailing_start, trailing_end)
 recorded_days = (
-    int(week_sales["business_date"].nunique())
-    if not week_sales.empty
+    int(trailing_sales["business_date"].nunique())
+    if not trailing_sales.empty
     else 0
 )
 if recorded_days < 7:
     st.caption(
-        f"Sales are recorded on {recorded_days} of 7 days "
-        "in this window. Annualized net sales is the net "
-        "sales from these 7 days, multiplied by 52."
+        "Annualized net sales uses the trailing 7 days "
+        f"({format_week_range(trailing_start, trailing_end)}). "
+        f"Sales are recorded on {recorded_days} of those 7 days, "
+        "then multiplied by 52."
     )
 
 st.caption(
     "Stores follow opening order: Marble Falls, Lampasas, "
     "Leander, then Temple. "
-    "Weekly growth % compares these 7 days with the 7 days "
-    "before them. Zero or positive growth is green, and "
+    "Week columns run from Monday through the business date. "
+    "Weekly growth % compares that window with the same days "
+    "one week earlier. Zero or positive growth is green, and "
     "negative growth is red. "
+    "Annualized net sales is the trailing 7 days, multiplied by 52. "
     "Hr labor % is hourly shift wages divided by net sales. "
     "18% or under is green, and above 18% is red. "
     "SpLH is net sales divided by hourly labor hours, with "
@@ -1392,7 +1494,7 @@ leaderboard_columns = [
 st.subheader("Review leaderboard")
 st.dataframe(
     leaderboard[leaderboard_columns],
-    column_config=leaderboard_column_config(),
+    column_config=leaderboard_column_config(week_start, week_end),
     hide_index=True,
     width="content",
     height=table_height(len(leaderboard)),
@@ -1400,8 +1502,9 @@ st.dataframe(
 st.caption(
     "Stores follow opening order: Marble Falls, Lampasas, "
     "Leander, then Temple. All stores pools every review "
-    "across stores. Week change columns are this week "
-    "minus the previous 7 days. Reviews (day) use the "
-    "selected date. Current score is the average of every "
-    "Google review stored for the store."
+    "across stores. Week columns run from Monday through "
+    "the business date. Week change columns compare that "
+    "window with the same days one week earlier. Reviews (day) "
+    "use the selected date. Current score is the average of "
+    "every Google review stored for the store."
 )
